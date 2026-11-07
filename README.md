@@ -78,6 +78,7 @@ zswitch_y_pos: -18.46     # REQUIRED - Y position of the endstop switch
 zswitch_z_pos: 7.8        # REQUIRED - Z position + some clearance of the endstop switch
 lift_z: 1                 # OPTIONAL - Amount to lift Z before moving (default: 1)
 move_speed: 60            # OPTIONAL - XY movement speed in mm/s (default: 60)
+zswitch_approach: direct  # OPTIONAL - how tools travel to the Z switch: direct (one diagonal move, default), x_then_y or y_then_x (line up one axis, then move straight in; use this if a tool clips the camera or other hardware on the way)
 config_file_path: ~/printer_data/config/axiscope.offsets  # OPTIONAL - file "Save to config file" writes tool offsets to (must be [include]d in printer.cfg, or point it at printer.cfg)
 z_move_speed: 10          # OPTIONAL - Z movement speed in mm/s (default: 10)
 start_gcode: 

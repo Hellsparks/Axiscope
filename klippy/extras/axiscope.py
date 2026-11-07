@@ -18,6 +18,11 @@ class Axiscope:
         self.move_speed    = config.getint('move_speed'  , 60)
         self.z_move_speed  = config.getint('z_move_speed', 10)
         self.samples       = config.getint('samples'     , 10)
+        # How MOVE_TO_ZSWITCH travels to the switch: one diagonal move, or one
+        # axis first so long tools don't sweep across nearby hardware.
+        self.approach      = config.getchoice('zswitch_approach',
+                                              {'direct': 'direct', 'x_then_y': 'x_then_y', 'y_then_x': 'y_then_x'},
+                                              'direct')
 
         self.pin              = config.get('pin'             , None)
         self.config_file_path = config.get('config_file_path', None)
@@ -230,9 +235,18 @@ class Axiscope:
         # Get current position
         current_pos = toolhead.get_position()
 
-        # First move horizontally to the target X,Y at current Z height
-        #toolhead.manual_move([self.x_pos, self.y_pos, current_pos[2]], self.move_speed)
-        self.gcode_move.cmd_G1(self.gcode.create_gcode_command("G0", "G0", { 'X': self.x_pos, 'Y': self.y_pos, 'Z': current_pos[2], 'F': self.move_speed*60 }))
+        # First move horizontally to the target X,Y at current Z height.
+        # With zswitch_approach x_then_y / y_then_x, one axis lines up with the
+        # switch first and the other then moves straight in.
+        if self.approach == 'x_then_y':
+            legs = [{'X': self.x_pos}, {'X': self.x_pos, 'Y': self.y_pos}]
+        elif self.approach == 'y_then_x':
+            legs = [{'Y': self.y_pos}, {'X': self.x_pos, 'Y': self.y_pos}]
+        else:
+            legs = [{'X': self.x_pos, 'Y': self.y_pos}]
+        for leg in legs:
+            params = dict(leg, Z=current_pos[2], F=self.move_speed*60)
+            self.gcode_move.cmd_G1(self.gcode.create_gcode_command("G0", "G0", params))
 
         # Then move vertically to the target Z height
         toolhead.manual_move([None, None, self.z_pos+self.lift_z], self.z_move_speed)
