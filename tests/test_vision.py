@@ -550,3 +550,34 @@ def test_revert_restores_z_after_autofocus():
 def test_focus_settings_are_clamped():
     s = merge_settings({"focus_range": 9, "focus_step": 0})
     assert s["focus_range"] == 2.0 and s["focus_step"] == 0.002
+
+
+
+class DriftingFocus(FocusRig):
+    """In focus at the start; after the first correction the focus height
+    drifts, and Z shifts the image (a slightly tilted camera), so a refocus
+    lands in the middle of the correction loop."""
+
+    def __init__(self, tilt_px_per_mm=(40.0, -25.0), **kw):
+        super().__init__(z=5.0, focus_z=5.0, **kw)
+        self.tilt = np.array(tilt_px_per_mm)
+
+    def move_relative(self, dx, dy, feed, approach):
+        super().move_relative(dx, dy, feed, approach)
+        if len(self.moves) == 3:          # probe X, probe Y, first correction
+            self.focus_z = 5.2
+
+    def nozzle_px(self):
+        return super().nozzle_px() + self.tilt * (self.z - 5.0)
+
+
+def test_refocus_mid_loop_is_not_mistaken_for_xy_motion():
+    rig = DriftingFocus()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    msgs = [s["message"] for s in st["steps"]]
+    assert any(m.startswith("Sharpest at Z") for m in msgs)
+    assert any(m.startswith("Refocused during this correction") for m in msgs)
+    assert abs(rig.z - 5.2) <= 0.03

@@ -75,35 +75,57 @@ window.CameraPosition = {
     this.save({ x: p[0], y: p[1], z: p[2] });
   },
 
-  // 1. X to the camera's X and Y to the bed centre (away from the tool docks)
-  // 2. Z to saved Z + LIFT_MM at normal speed
+  // The one safe path to the camera, used by "Move T0 to camera" and by
+  // tool changes that bring a tool back to the camera (app.js toolChange):
+  // 1. X to the target X and Y to the bed centre (away from the tool docks)
+  // 2. Z to target Z + LIFT_MM at normal speed
   // 3. Y forward over the camera
-  // 4. slowly down the last LIFT_MM to the saved Z
-  // If the toolhead starts below saved Z + LIFT_MM it rises first, so step 1
-  // never drags low across the machine.
-  async goTo() {
-    const why = this.blocked(true);
-    if (why) { notice('Not moved: ' + why, 'error'); return; }
-    const st = S.status, c = this.pos;
-    if (!st.axisMin || !st.axisMax) { notice('Not moved: the printer did not report its axis limits.', 'error'); return; }
-    const centreY = (st.axisMin[1] + st.axisMax[1]) / 2;
-    const clearZ = Math.min(c.z + this.LIFT_MM, st.axisMax[2]);
+  // 4. slowly down the last LIFT_MM to the target Z
+  // If the toolhead is below target Z + LIFT_MM it rises first, so step 1
+  // never drags low across the machine. Position and limits are read fresh
+  // from the printer, so this is right straight after a tool change too.
+  // Resolves true when the move completed.
+  async approach(x, y, z, label = 'Move to camera') {
+    let pos, min, max;
+    try {
+      const st = await Printer.query(['gcode_move', 'toolhead']);
+      pos = st.gcode_move.gcode_position;
+      min = st.toolhead.axis_minimum;
+      max = st.toolhead.axis_maximum;
+    } catch (e) {
+      notice(label + ' not started: could not read the toolhead position (' + e.message + ').', 'error');
+      return false;
+    }
+    if (!pos || !min || !max) { notice(label + ' not started: the printer did not report its position and limits.', 'error'); return false; }
+    const centreY = (min[1] + max[1]) / 2;
+    const clearZ = Math.min(z + this.LIFT_MM, max[2]);
     const f = v => v.toFixed(3);
     const script = ['SAVE_GCODE_STATE NAME=axiscope_campos', 'G90'];
-    if (st.pos[2] < clearZ) script.push(`G0 Z${f(clearZ)} F${this.Z_FEED}`);
+    if (pos[2] < clearZ) script.push(`G0 Z${f(clearZ)} F${this.Z_FEED}`);
     script.push(
-      `G0 X${f(c.x)} Y${f(centreY)} F${this.XY_FEED}`,
+      `G0 X${f(x)} Y${f(centreY)} F${this.XY_FEED}`,
       `G0 Z${f(clearZ)} F${this.Z_FEED}`,
-      `G0 Y${f(c.y)} F${this.XY_FEED}`,
-      `G0 Z${f(c.z)} F${this.DESCEND_FEED}`,
+      `G0 Y${f(y)} F${this.XY_FEED}`,
+      `G0 Z${f(z)} F${this.DESCEND_FEED}`,
       'RESTORE_GCODE_STATE NAME=axiscope_campos');
     this.moving = true;
     this.render();
+    try {
+      return await run(script.join('\n'), label);
+    } finally {
+      this.moving = false;
+      this.render();
+    }
+  },
+
+  async goTo() {
+    const why = this.blocked(true);
+    if (why) { notice('Not moved: ' + why, 'error'); return; }
+    const c = this.pos;
     notice('Moving T0 to the saved camera position…');
-    const ok = await run(script.join('\n'), 'Move to camera');
-    this.moving = false;
-    this.render();
-    if (ok) notice('T0 is at the saved camera position. Fine-tune with the arrows or Auto align, then Capture reference.');
+    if (await this.approach(c.x, c.y, c.z)) {
+      notice('T0 is at the saved camera position. Fine-tune with the arrows or Auto align, then Capture reference.');
+    }
   },
 
   render() {

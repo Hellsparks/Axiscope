@@ -830,17 +830,18 @@ async function toolChange(n) {
   if (ax) lines.push('AXISCOPE_BEFORE_PICKUP_GCODE');
   lines.push('T' + n);
   if (ax) lines.push('AXISCOPE_AFTER_PICKUP_GCODE');
-  if (S.ref) {
-    // Bring the new tool to the camera: its own captured spot if it has one.
-    let { x, y } = S.ref;
-    if (n !== 0 && S.grabs[n]) ({ x, y } = S.grabs[n]);
-    lines.push('SAVE_GCODE_STATE NAME=RESTORE_POS', 'G90',
-      'G0 Z' + S.ref.z.toFixed(3) + ' F3000',
-      'G0 X' + x.toFixed(3) + ' Y' + y.toFixed(3) + ' F12000',
-      'RESTORE_GCODE_STATE NAME=RESTORE_POS');
-  }
   notice('Changing to T' + n + '…');
-  if (await run(lines.join('\n'), 'Tool change')) notice('T' + n + ' is active.' + (S.ref ? '' : ' Capture T0 to have tools return to the camera.'));
+  if (!await run(lines.join('\n'), 'Tool change')) return;
+  if (!S.ref) { notice('T' + n + ' is active. Capture T0 to have tools return to the camera.'); return; }
+  // Bring the new tool to the camera (its own captured spot if it has one)
+  // along the safe path: staged at the bed centre in Y, clear of the docks,
+  // then forward over the camera and slowly down. See CameraPosition.approach.
+  let { x, y } = S.ref;
+  if (n !== 0 && S.grabs[n]) ({ x, y } = S.grabs[n]);
+  notice('T' + n + ' is active. Moving it to the camera…');
+  if (await CameraPosition.approach(x, y, S.ref.z, 'Move T' + n + ' to the camera')) {
+    notice('T' + n + ' is over the camera.');
+  }
 }
 
 function jog(axis, dir) {

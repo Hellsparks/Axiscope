@@ -582,6 +582,7 @@ class AutoAligner:
                 # take a short step first and see if the image agrees.
                 move = move * (s["probe_distance"] / float(np.hypot(*move)))
             corrections += 1
+            searches_before = self._focus_searches
             self._step("correct", "Correction %d/%d: X%+.4f Y%+.4f mm (error %.4f mm)"
                        % (corrections, s["max_iterations"], move[0], move[1], err_mm),
                        move=[round(float(v), 4) for v in move], error_mm=round(err_mm, 4))
@@ -599,6 +600,15 @@ class AutoAligner:
                                          min_departure=0.5 * float(np.hypot(*expected)))
             if p_new is None:
                 raise AlignError("Lost the nozzle after correction %d." % corrections)
+            if self._focus_searches != searches_before:
+                # Z moved to refocus during this measurement, which can shift
+                # the image too: the motion isn't all from the XY move. Don't
+                # judge progress or refine the mapping from it; start afresh.
+                self._step("observe", "Refocused during this correction; measuring again from here "
+                           "instead of judging the move.")
+                p = p_new
+                last_err, worse = None, 0
+                continue
             observed = p_new - p
             self._step("observe", "Image moved %.1f px %s (expected %.1f px %s)%s"
                        % (np.hypot(*observed), _image_dir(observed),

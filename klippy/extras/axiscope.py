@@ -255,6 +255,14 @@ class Axiscope:
     cmd_PROBE_ZSWITCH_help = "Probe the Z switch to determine offset."
 
     def cmd_PROBE_ZSWITCH(self, gcmd):
+        # Refuse with a G-code error instead of crashing: an unexpected Python
+        # exception here makes Klipper shut the whole printer down.
+        if self.probe_multi_axis is None:
+            raise gcmd.error("PROBE_ZSWITCH: no Z switch pin configured in [axiscope].")
+        if self.toolchanger.active_tool is None:
+            raise gcmd.error("PROBE_ZSWITCH: the toolchanger has no active tool (status: %s). "
+                             "Run INITIALIZE_TOOLCHANGER, then try again."
+                             % self.toolchanger.get_status(self.printer.get_reactor().monotonic()).get('status', 'unknown'))
         toolhead  = self.printer.lookup_object('toolhead')
         tool_no   = str(self.toolchanger.active_tool.tool_number)
         start_pos = toolhead.get_position()
