@@ -786,10 +786,12 @@ function renderView() {
   const v = S.view;
   $('crosshair-enabled').checked = v.crosshair;
   setText('zoom-label', Math.round(v.zoom * 100) + '%');
+  $('zoom').value = v.zoom;
   $('flip-h').setAttribute('aria-pressed', v.flipH);
   $('flip-v').setAttribute('aria-pressed', v.flipV);
   setText('rotate-label', (v.rotate || 0) + '°');
   $('contrast').value = v.contrast;
+  setText('contrast-label', v.contrast + '%');
   setText('cam-name', S.camera ? S.camera.name : '—');
   CameraView.applyView();
   if (window.SurroundJog) SurroundJog.update();
@@ -985,12 +987,26 @@ function initEvents() {
   $('flip-h').addEventListener('click', () => { S.view.flipH = !S.view.flipH; LS.set('view', S.view); saveOrientation(); renderView(); });
   $('flip-v').addEventListener('click', () => { S.view.flipV = !S.view.flipV; LS.set('view', S.view); saveOrientation(); renderView(); });
   $('rotate-view').addEventListener('click', () => { S.view.rotate = ((S.view.rotate || 0) + 90) % 360; LS.set('view', S.view); saveOrientation(); renderView(); });
-  $('contrast').addEventListener('input', e => { S.view.contrast = Number(e.target.value); LS.set('view', S.view); CameraView.applyView(); });
-  const zoomBy = d => {
-    const i = ZOOM_STEPS.findIndex(z => z >= S.view.zoom - 1e-6);
-    S.view.zoom = ZOOM_STEPS[Math.max(0, Math.min(ZOOM_STEPS.length - 1, (i < 0 ? 0 : i) + d))];
+  $('contrast').addEventListener('input', e => {
+    S.view.contrast = Number(e.target.value);
+    LS.set('view', S.view);
+    setText('contrast-label', S.view.contrast + '%');
+    CameraView.applyView();
+  });
+  const setZoom = z => {
+    S.view.zoom = Math.max(ZOOM_STEPS[0], Math.min(ZOOM_STEPS[ZOOM_STEPS.length - 1], z));
     LS.set('view', S.view);
     renderView();
+  };
+  // Slider: smooth zoom while dragging; re-run detection once it is let go
+  $('zoom').addEventListener('input', e => setZoom(Number(e.target.value)));
+  $('zoom').addEventListener('change', () => Vision.kick());
+  // −/+ jump to the next preset step, also from an in-between slider value
+  const zoomBy = d => {
+    const z = S.view.zoom;
+    const next = d > 0 ? ZOOM_STEPS.find(s => s > z + 1e-6) : [...ZOOM_STEPS].reverse().find(s => s < z - 1e-6);
+    if (next === undefined) return;
+    setZoom(next);
     Vision.kick();
   };
   $('zoom-in').addEventListener('click', () => zoomBy(1));

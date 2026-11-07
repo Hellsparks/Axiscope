@@ -54,8 +54,6 @@ main { max-width: 2200px; }
 .view-tools { display: flex; gap: 6px; }
 .chip-btn { border: 1px solid var(--line); background: var(--raised); color: #b8c2b2; border-radius: min(var(--radius), 6px); font: 10px monospace; padding: 5px 8px; }
 .chip-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--tint); }
-.contrast-control { display: flex; align-items: center; gap: 8px; font-size: 11px; }
-.contrast-control input { width: 90px; accent-color: var(--accent); }
 
 /* auto-align progress shown on the camera image */
 .align-badge { position: absolute; left: 50%; top: 17px; transform: translateX(-50%); max-width: calc(100% - 260px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; z-index: 2;
@@ -276,7 +274,6 @@ main { max-width: 2200px; }
 @media (max-width: 760px) {
   .detection-advanced-body .detection-ranges, .settings-grid, .align-metrics { grid-template-columns: 1fr 1fr; }
   .camera-option img { width: 88px; }
-  .contrast-control input { width: 70px; }
   .align-steps li { grid-template-columns: 64px 1fr; }
   .minicam-toggle { font-size: 0; gap: 0; padding: 5px 7px; }
 }
@@ -291,10 +288,25 @@ main { max-width: 2200px; }
   padding: 6px;
 }
 .camera-surround .camera-viewport { grid-column: 2; grid-row: 2; }
-.workbench .camera-surround .camera-viewport { max-height: calc(100vh - 314px); }
+.workbench .camera-surround .camera-viewport { max-height: calc(100vh - 370px); }
 .edge-jog { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0; font-size: 18px; line-height: 1; }
 .edge-up    { grid-column: 2; grid-row: 1; }
 .edge-down  { grid-column: 2; grid-row: 3; }
 .edge-left  { grid-column: 1; grid-row: 2; flex-direction: column; gap: 5px; }
 .edge-right { grid-column: 3; grid-row: 2; flex-direction: column; gap: 5px; }
 .edge-label { font: 10px monospace; letter-spacing: .5px; opacity: .7; }
+
+/* Zoom and contrast sliders under the camera */
+.view-sliders {
+  display: grid;
+  grid-template-columns: 64px 24px minmax(0, 1fr) 24px 46px;
+  align-items: center;
+  gap: 10px 8px;
+  padding: 8px 18px 4px;
+  font-size: 11px;
+  color: #a3ad99;
+}
+.view-sliders input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
+.view-sliders .span-steps { grid-column: 3; }
+.slider-step { border: 0; background: none; color: #c2cbb9; font-size: 18px; line-height: 1; padding: 0; }
+.view-slider-value { grid-column: 5; font: 11px monospace; text-align: right; }
