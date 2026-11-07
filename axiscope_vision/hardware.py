@@ -122,3 +122,10 @@ class MoonrakerPrinter:
 
     def move_absolute(self, x, y, feed, approach):
         self._move("abs", x, y, feed, approach)
+
+    def move_z_absolute(self, z, feed):
+        """Z only (auto focus), in G-code coordinates like position()."""
+        self.gcode("\n".join([
+            "SAVE_GCODE_STATE NAME=%s" % self.STATE, "G90",
+            "G0 Z%.4f F%d" % (z, int(feed * 60)),
+            "RESTORE_GCODE_STATE NAME=%s" % self.STATE, "M400"]))

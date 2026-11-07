@@ -20,6 +20,7 @@ import os
 import threading
 import time
 
+import cv2
 import numpy as np
 
 from .detect import detect
@@ -35,6 +36,8 @@ ALIGN_DEFAULTS = {
     "feed": 10.0,             # mm/s
     "approach": 0.0,          # mm backlash approach (0 disables)
     "reuse_calibration": True,  # use the saved camera mapping instead of probing
+    "focus_range": 0.5,       # mm either way Z may move to refocus when frames disagree (0 disables)
+    "focus_step": 0.01,       # mm, final focus step (the coarse pass uses 5x this)
 }
 
 _LIMITS = {
@@ -47,7 +50,13 @@ _LIMITS = {
     "samples": (int, 1, 9),
     "feed": (float, 1.0, 100.0),
     "approach": (float, 0.0, 2.0),
+    "focus_range": (float, 0.0, 2.0),
+    "focus_step": (float, 0.002, 0.1),
 }
+
+MAX_FOCUS_SEARCHES = 2        # per run, so an unfocusable image can't loop forever
+FOCUS_GAIN = 1.03             # a step must be 3% sharper to count (sharpness is noisy)
+FOCUS_COARSE = 5              # coarse pass step = FOCUS_COARSE x focus_step
 
 MIN_PX_PER_MM = 10.0       # less than this and the camera is not seeing motion
 MAX_SKEW_DEG = 30.0        # probe axes must be roughly perpendicular in the image
@@ -173,6 +182,8 @@ class AutoAligner:
         self.roi = roi   # search only this part of the frame (the zoomed-in area)
         self._frame = None
         self._settle_note = ""
+        self._focus_searches = 0
+        self._focus_origin = None   # Z of the first focus search in this run
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._thread = None
@@ -315,10 +326,100 @@ class AutoAligner:
         spread = float(np.max(np.hypot(*(pts - med).T))) if len(pts) > 1 else 0.0
         r_main = max(r["r"] for r in last["best"]["rings"]) if last and last["best"] else 0.0
         if spread > max(MAX_SAMPLE_SPREAD, SAMPLE_SPREAD_FRACTION * r_main):
+            # Usually the nozzle face is out of focus, so its ring edges
+            # wobble between frames. Refocus in Z and measure again.
+            if self._can_focus():
+                self._step("focus", "Frames disagree by %.1f px; searching Z for a sharper image." % spread)
+                self._autofocus(med, r_main)
+                return self._measure(hint=(float(med[0]), float(med[1])), ref=ref, lock=lock)
             raise AlignError(
                 "Frames disagree by %.1f px; the camera image is not stable "
                 "(vibration, stale frames or a second circle in view)." % spread)
         return med, last
+
+    # -------------------------------------------------------------- focus
+    def _can_focus(self):
+        return (self.settings["focus_range"] > 0
+                and self._focus_searches < MAX_FOCUS_SEARCHES
+                and hasattr(self.printer, "move_z_absolute"))
+
+    def _sharpness(self, center, r_main, frames=2):
+        """Focus score: Laplacian variance inside a disc just past the nozzle's
+        outer ring, so glare and texture around the nozzle don't count."""
+        r = max(10, int(round(1.15 * r_main)))
+        cx, cy = int(round(center[0])), int(round(center[1]))
+        scores = []
+        for _ in range(frames):
+            self._check_cancel()
+            img = self.camera.frame()
+            gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+            x0, y0 = max(0, cx - r), max(0, cy - r)
+            x1, y1 = min(w, cx + r + 1), min(h, cy + r + 1)
+            if x1 - x0 < 5 or y1 - y0 < 5:
+                return 0.0
+            lap = cv2.Laplacian(gray[y0:y1, x0:x1], cv2.CV_64F)
+            yy, xx = np.ogrid[y0:y1, x0:x1]
+            scores.append(float(lap[(xx - cx) ** 2 + (yy - cy) ** 2 <= r * r].var()))
+        return float(np.mean(scores))
+
+    def _goto_z(self, z):
+        self._check_cancel()
+        s = self.settings
+        self.printer.move_z_absolute(z, s["feed"])
+        if s["settle"]:
+            time.sleep(s["settle"])
+
+    @staticmethod
+    def _climb(z_from, best, step, lo, hi, score_at):
+        """Hill-climb from z_from (sharpness `best`): walk up in `step` while it
+        gets sharper; if up never helped, walk down instead. Two steps in a row
+        without improvement end a direction. Returns (sharpest z, its score)."""
+        best_z = z_from
+        for direction in (1, -1):
+            z, misses, improved = z_from, 0, False
+            while misses < 2:
+                z = round(z + direction * step, 4)
+                if z < lo - 1e-9 or z > hi + 1e-9:
+                    break
+                v = score_at(z)
+                if v > best * FOCUS_GAIN:
+                    best, best_z, misses, improved = v, z, 0, True
+                else:
+                    misses += 1
+            if improved:
+                break
+        return best_z, best
+
+    def _autofocus(self, center, r_main):
+        """Coarse then fine Z search for the sharpest nozzle face, within
+        focus_range of where it started. Ends parked at the sharpest Z."""
+        s = self.settings
+        self._focus_searches += 1
+        z0 = float(self.printer.position()[2])
+        # The range is measured from where the first search started, so
+        # repeated searches can't creep further than focus_range in total.
+        if self._focus_origin is None:
+            self._focus_origin = z0
+        lo, hi = self._focus_origin - s["focus_range"], self._focus_origin + s["focus_range"]
+        tried = []
+
+        def score_at(z):
+            self._goto_z(z)
+            v = self._sharpness(center, r_main)
+            tried.append(z)
+            return v
+
+        start = self._sharpness(center, r_main)
+        z, best = self._climb(z0, start, s["focus_step"] * FOCUS_COARSE, lo, hi, score_at)
+        z, best = self._climb(z, best, s["focus_step"], lo, hi, score_at)
+        self._goto_z(z)
+        if abs(z - z0) < 1e-6:
+            self._step("focus", "No sharper Z within ±%.2f mm of Z%.3f (%d heights tried); staying at Z%.3f."
+                       % (s["focus_range"], self._focus_origin, len(tried), z0), z=round(z0, 4))
+        else:
+            self._step("focus", "Sharpest at Z%.3f (%+.3f mm, %d heights tried, sharpness %.0f → %.0f)."
+                       % (z, z - z0, len(tried), start, best), z=round(z, 4), dz=round(z - z0, 4))
 
     @staticmethod
     def _same_nozzle(ref, b):
@@ -611,4 +712,7 @@ class AutoAligner:
             raise AlignError("Nothing to revert.")
         s = self.settings
         self.printer.move_absolute(start[0], start[1], s["feed"], s["approach"])
+        # Auto focus may have moved Z: put that back too.
+        if self._focus_searches and len(start) > 2 and hasattr(self.printer, "move_z_absolute"):
+            self.printer.move_z_absolute(start[2], s["feed"])
         return start

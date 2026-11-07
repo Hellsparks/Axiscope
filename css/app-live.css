@@ -295,6 +295,9 @@ main { max-width: 2200px; }
 .edge-left  { grid-column: 1; grid-row: 2; flex-direction: column; gap: 5px; }
 .edge-right { grid-column: 3; grid-row: 2; flex-direction: column; gap: 5px; }
 .edge-label { font: 10px monospace; letter-spacing: .5px; opacity: .7; }
+/* Setup → Appearance: arrows switched off, camera fills the panel as before */
+.camera-surround.edges-off { display: block; padding: 0; }
+.camera-surround.edges-off .edge-jog { display: none; }
 
 /* Zoom and contrast sliders under the camera */
 .view-sliders {

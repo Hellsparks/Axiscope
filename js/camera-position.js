@@ -7,16 +7,16 @@
 // The position lives in Moonraker's database (namespace "axiscope"), so every
 // browser that opens Axiscope sees it; a copy is kept in this browser in case
 // the printer refuses the write. Capturing the T0 reference updates it too.
-// Use "Move T0 to camera" right after picking up T0, while the toolhead is
-// still at the dock-clear Y the tool change left it at.
+// "Move T0 to camera" stages at the bed centre in Y (clear of the tool docks)
+// before coming forward over the camera; see goTo().
 
 window.CameraPosition = {
   NS: 'axiscope',
   KEY: 'camera_position',
-  LIFT_MM: 5,          // clearance above the higher of current Z and saved Z
+  LIFT_MM: 5,          // approach height above the saved Z
   XY_FEED: 6000,       // mm/min
-  LIFT_FEED: 600,
-  DESCEND_FEED: 120,   // slow final approach down to the camera
+  Z_FEED: 600,
+  DESCEND_FEED: 120,   // slow final LIFT_MM down to the camera
 
   pos: null,           // { x, y, z, saved_at }
   source: '',          // 'printer' | 'browser'
@@ -75,29 +75,32 @@ window.CameraPosition = {
     this.save({ x: p[0], y: p[1], z: p[2] });
   },
 
-  // Lift in place, line up X at the current Y (after a tool change that Y is
-  // clear of the docks), move straight in along Y, then slowly down to the
-  // saved Z. No diagonal sweeps, so long tools don't clip the camera.
+  // 1. X to the camera's X and Y to the bed centre (away from the tool docks)
+  // 2. Z to saved Z + LIFT_MM at normal speed
+  // 3. Y forward over the camera
+  // 4. slowly down the last LIFT_MM to the saved Z
+  // If the toolhead starts below saved Z + LIFT_MM it rises first, so step 1
+  // never drags low across the machine.
   async goTo() {
     const why = this.blocked(true);
     if (why) { notice('Not moved: ' + why, 'error'); return; }
     const st = S.status, c = this.pos;
-    const maxZ = st.axisMax ? st.axisMax[2] : Infinity;
-    const lift = Math.min(Math.max(st.pos[2], c.z) + this.LIFT_MM, maxZ);
+    if (!st.axisMin || !st.axisMax) { notice('Not moved: the printer did not report its axis limits.', 'error'); return; }
+    const centreY = (st.axisMin[1] + st.axisMax[1]) / 2;
+    const clearZ = Math.min(c.z + this.LIFT_MM, st.axisMax[2]);
     const f = v => v.toFixed(3);
-    const script = [
-      'SAVE_GCODE_STATE NAME=axiscope_campos',
-      'G90',
-      `G0 Z${f(lift)} F${this.LIFT_FEED}`,
-      `G0 X${f(c.x)} F${this.XY_FEED}`,
+    const script = ['SAVE_GCODE_STATE NAME=axiscope_campos', 'G90'];
+    if (st.pos[2] < clearZ) script.push(`G0 Z${f(clearZ)} F${this.Z_FEED}`);
+    script.push(
+      `G0 X${f(c.x)} Y${f(centreY)} F${this.XY_FEED}`,
+      `G0 Z${f(clearZ)} F${this.Z_FEED}`,
       `G0 Y${f(c.y)} F${this.XY_FEED}`,
       `G0 Z${f(c.z)} F${this.DESCEND_FEED}`,
-      'RESTORE_GCODE_STATE NAME=axiscope_campos',
-    ].join('\n');
+      'RESTORE_GCODE_STATE NAME=axiscope_campos');
     this.moving = true;
     this.render();
     notice('Moving T0 to the saved camera position…');
-    const ok = await run(script, 'Move to camera');
+    const ok = await run(script.join('\n'), 'Move to camera');
     this.moving = false;
     this.render();
     if (ok) notice('T0 is at the saved camera position. Fine-tune with the arrows or Auto align, then Capture reference.');
@@ -116,7 +119,7 @@ window.CameraPosition = {
     save.disabled = !!saveWhy;
     save.title = saveWhy || 'Save T0’s current X/Y/Z as the camera position';
     go.disabled = !!goWhy;
-    go.title = goWhy || 'Up ' + this.LIFT_MM + ' mm → X to the camera → straight in along Y → slowly down to the saved Z';
+    go.title = goWhy || 'X to the camera, Y to bed centre → Z to saved +' + this.LIFT_MM + ' mm → Y over the camera → slowly down to the saved Z';
     setText('campos-goto-label', this.moving ? 'Moving…' : 'Move T0 to camera');
   },
 

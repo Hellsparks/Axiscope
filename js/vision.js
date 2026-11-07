@@ -14,6 +14,7 @@ const DETECTION_KEYS = ['min_radius', 'max_radius', 'hough_votes', 'canny_low', 
 const ALIGN_DEFAULTS = {
   max_iterations: 5, tolerance: 0.01, probe_distance: 0.5, max_move: 3.0,
   settle: 0.4, samples: 3, feed: 10, approach: 0, reuse_calibration: true,
+  focus_range: 0.5, focus_step: 0.01,
 };
 const ALIGN_FIELDS = [
   { key: 'max_iterations', label: 'Max corrections (N)', min: 1, max: 25, step: 1, unit: '' },
@@ -24,9 +25,11 @@ const ALIGN_FIELDS = [
   { key: 'samples', label: 'Frames per scan', min: 1, max: 9, step: 1, unit: '' },
   { key: 'feed', label: 'Move speed', min: 1, max: 100, step: 1, unit: 'mm/s' },
   { key: 'approach', label: 'Backlash approach', min: 0, max: 2, step: 0.05, unit: 'mm' },
+  { key: 'focus_range', label: 'Focus search (0 = off)', min: 0, max: 2, step: 0.05, unit: '±mm' },
+  { key: 'focus_step', label: 'Focus step', min: 0.002, max: 0.1, step: 0.001, unit: 'mm' },
 ];
 // Backend features this page uses (see API_FEATURES in app.py).
-const NEEDED_FEATURES = ['detect', 'align', 'orient', 'lock', 'mapping', 'vision_frame', 'autotune', 'roi'];
+const NEEDED_FEATURES = ['detect', 'align', 'orient', 'lock', 'mapping', 'vision_frame', 'autotune', 'roi', 'focus'];
 const RESTART_HINT = 'Restart the axiscope service (Mainsail → Services → axiscope → Restart, or sudo systemctl restart axiscope).';
 
 const TERMINAL = ['converged', 'not_converged', 'calibrated', 'failed', 'cancelled'];

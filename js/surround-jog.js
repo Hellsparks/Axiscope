@@ -5,8 +5,8 @@
 // the first Auto align), each edge drives whichever machine axis actually moves
 // the nozzle that way on screen, taking the current Flip H / Flip V / Rotate
 // into account. Without a mapping they fall back to the side pad's convention
-// (right = +X, up = +Y), which is what an oriented view shows. Arrow keys jog
-// X/Y the same way; Page Up / Page Down jog Z.
+// (right = +X, up = +Y), which is what an oriented view shows. Arrow keys or
+// W/A/S/D jog X/Y the same way; Page Up / Page Down or R/F jog Z.
 //
 // The edge buttons are ordinary `.jog[data-jog]` buttons, so app.js handles
 // their clicks and their enabled/disabled state; this file only keeps their
@@ -61,19 +61,38 @@ window.SurroundJog = {
     });
   },
 
+  // Setup → Appearance can hide the edge buttons; the camera then fills the
+  // panel as before. Keyboard jogging keeps working either way.
+  enabled: LS.get('surroundJog', true),
+
+  applyEnabled() {
+    document.querySelector('.camera-surround').classList.toggle('edges-off', !this.enabled);
+    const toggle = document.getElementById('surround-jog-enabled');
+    if (toggle) toggle.checked = this.enabled;
+    // No refit needed here: CameraView's ResizeObserver refits the image
+    // when the viewport changes size.
+  },
+
   init() {
-    // On the Calibration tab, arrow keys press the matching edge button and
-    // Page Up / Page Down press the side panel's Z+ / Z− buttons.
+    const toggle = document.getElementById('surround-jog-enabled');
+    if (toggle) toggle.addEventListener('change', e => {
+      this.enabled = e.target.checked;
+      LS.set('surroundJog', this.enabled);
+      this.applyEnabled();
+    });
+    this.applyEnabled();
+
+    // On the Calibration tab, arrow keys (or W/A/S/D) press the matching edge
+    // button, and Page Up / Page Down (or R/F) press the side panel's Z+ / Z−.
+    const UP = '.edge-jog[data-edge="up"]', DOWN = '.edge-jog[data-edge="down"]';
+    const LEFT = '.edge-jog[data-edge="left"]', RIGHT = '.edge-jog[data-edge="right"]';
+    const ZUP = '.z-jog .jog[data-jog="Z"][data-dir="1"]', ZDOWN = '.z-jog .jog[data-jog="Z"][data-dir="-1"]';
     const keys = {
-      ArrowUp: '.edge-jog[data-edge="up"]',
-      ArrowDown: '.edge-jog[data-edge="down"]',
-      ArrowLeft: '.edge-jog[data-edge="left"]',
-      ArrowRight: '.edge-jog[data-edge="right"]',
-      PageUp: '.z-jog .jog[data-jog="Z"][data-dir="1"]',
-      PageDown: '.z-jog .jog[data-jog="Z"][data-dir="-1"]',
+      ArrowUp: UP, ArrowDown: DOWN, ArrowLeft: LEFT, ArrowRight: RIGHT, PageUp: ZUP, PageDown: ZDOWN,
+      w: UP, s: DOWN, a: LEFT, d: RIGHT, r: ZUP, f: ZDOWN,
     };
     document.addEventListener('keydown', e => {
-      const selector = keys[e.key];
+      const selector = keys[e.key.length === 1 ? e.key.toLowerCase() : e.key];
       if (!selector || S.tab !== 'calibration' || e.altKey || e.ctrlKey || e.metaKey) return;
       if (e.target.closest('input, textarea, select, [contenteditable], #minicam')) return;
       const b = document.querySelector(selector);

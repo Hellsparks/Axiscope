@@ -473,3 +473,80 @@ def test_orient_view_matches_css_order():
     # Flip H first (marker to top-right), then 90 cw: marker ends bottom-right.
     r = orient_view(img, {"rotate": 90, "flipH": True})
     assert r[2, 1] == 255
+
+
+# --------------------------------------------------------------- auto focus
+class FocusRig(SimRig):
+    """A camera with a shallow depth of field: away from focus_z the image
+    blurs and the detected centre wobbles from frame to frame (soft ring
+    edges), which fails the "frames disagree" check until Z is refocused."""
+
+    def __init__(self, z=5.0, focus_z=5.31, vibration=0.0, **kw):
+        super().__init__(**kw)
+        self.z, self.focus_z = z, focus_z
+        self.vibration = vibration   # px of wobble that no focus height fixes
+        self.z_moves = []
+        self.rng = np.random.default_rng(7)
+
+    def position(self):
+        return [float(self.pos[0]), float(self.pos[1]), float(self.z)]
+
+    def move_z_absolute(self, z, feed):
+        self.z_moves.append(z)
+        self.z = z
+
+    def frame(self):
+        self.frame_no += 1
+        defocus = abs(self.z - self.focus_z)
+        wobble = 8.0 * max(0.0, defocus - 0.03) / 0.3 + self.vibration
+        jx, jy = self.rng.normal(0, wobble, 2) if wobble else (0.0, 0.0)
+        x, y = self.nozzle_px()
+        img = render_nozzle(x + jx, y + jy, self.w, self.h, seed=self.seed + self.frame_no)
+        return cv2.GaussianBlur(img, (0, 0), 0.3 + 2.5 * defocus)
+
+
+def test_autofocus_rescues_unstable_frames_and_converges():
+    rig = FocusRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert abs(rig.z - rig.focus_z) <= 0.03          # parked near the sharpest height
+    assert all(abs(z - 5.0) <= 0.5 + 1e-9 for z in rig.z_moves)   # never beyond focus_range
+    focus = [s["message"] for s in st["steps"] if s["phase"] == "focus"]
+    assert focus and focus[-1].startswith("Sharpest at Z")
+
+
+def test_autofocus_off_keeps_the_old_failure():
+    rig = FocusRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, focus_range=0))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "Frames disagree" in st["message"]
+    assert rig.z_moves == []
+
+
+def test_autofocus_gives_up_when_refocusing_does_not_help():
+    rig = FocusRig(vibration=6.0)                     # wobble that no Z height fixes
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, focus_range=0.35))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "Frames disagree" in st["message"]
+    # The first search ends near 5.30; the second must still stay within
+    # 0.35 mm of the original 5.0, not of where the first one ended.
+    assert all(abs(z - 5.0) <= 0.35 + 1e-9 for z in rig.z_moves)
+    assert sum(1 for s in st["steps"] if s["phase"] == "focus" and s["message"].startswith("Frames")) <= 2
+
+
+def test_revert_restores_z_after_autofocus():
+    rig = FocusRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST))
+    a.run()
+    assert a.snapshot()["state"] == "converged"
+    a.revert()
+    assert rig.position() == pytest.approx([150.4, 149.7, 5.0])
+
+
+def test_focus_settings_are_clamped():
+    s = merge_settings({"focus_range": 9, "focus_step": 0})
+    assert s["focus_range"] == 2.0 and s["focus_step"] == 0.002

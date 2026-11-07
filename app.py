@@ -24,7 +24,7 @@ app = Flask(__name__)
 
 # What this backend can do. The page compares it with what it needs, so an
 # updated page talking to a not-yet-restarted service says so plainly.
-API_FEATURES = ['detect', 'align', 'orient', 'lock', 'mapping', 'vision_frame', 'autotune', 'roi']
+API_FEATURES = ['detect', 'align', 'orient', 'lock', 'mapping', 'vision_frame', 'autotune', 'roi', 'focus']
 
 # Learned camera mappings live outside the git checkout, so Moonraker's
 # update manager never sees a dirty repo.

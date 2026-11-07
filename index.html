@@ -241,8 +241,8 @@
                   <span class="axis-label axis-x">X</span>
                 </div>
                 <div class="z-jog" role="group" aria-label="Z">
-                  <button type="button" class="jog" data-jog="Z" data-dir="1" aria-label="Move Z up" title="Move Z up (Page Up)">Z+</button>
-                  <button type="button" class="jog" data-jog="Z" data-dir="-1" aria-label="Move Z down" title="Move Z down (Page Down)">Z−</button>
+                  <button type="button" class="jog" data-jog="Z" data-dir="1" aria-label="Move Z up" title="Move Z up (Page Up or R)">Z+</button>
+                  <button type="button" class="jog" data-jog="Z" data-dir="-1" aria-label="Move Z down" title="Move Z down (Page Down or F)">Z−</button>
                 </div>
               </div>
               <div class="position-readout">
@@ -361,6 +361,7 @@
               <button type="button" id="theme-reset" class="text-button">Reset defaults</button>
             </div>
             <p id="theme-feedback" class="theme-feedback" role="status"></p>
+            <label class="toggle-label settings-switch"><input id="surround-jog-enabled" type="checkbox" role="switch" checked>Show jog arrows around the camera (arrow keys / WASD and Page Up / Page Down / R / F jog either way)</label>
           </div>
         </section>
 
