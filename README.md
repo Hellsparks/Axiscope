@@ -161,7 +161,7 @@ cors_domains:
 ### Calibrating XY offsets
 
 1. On **Calibration**, home the printer and pick up `T0` with the tool buttons.
-2. Centre the `T0` nozzle on the crosshair, with **Auto align** or by jogging, then press **Capture reference** (or Enter).
+2. Centre the `T0` nozzle on the crosshair, with **Auto align** or by jogging, then press **Capture reference** (or Enter). To jog, click the arrows around the camera (or use the arrow keys) to move the nozzle that way on screen; Page Up / Page Down move Z.
 3. Select `Tn`. Axiscope changes tools and moves the new tool to the captured position.
 4. Centre `Tn` on the crosshair and press **Capture Tn position**. The new offset appears in **Tool offsets**.
 5. Repeat for every tool, then open **Offsets** to review the generated config. Use **Copy config**, or **Save to config file** (this needs `config_file_path`, see below), then run `FIRMWARE_RESTART`.

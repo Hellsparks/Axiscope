@@ -5,7 +5,8 @@
 // the first Auto align), each edge drives whichever machine axis actually moves
 // the nozzle that way on screen, taking the current Flip H / Flip V / Rotate
 // into account. Without a mapping they fall back to the side pad's convention
-// (right = +X, up = +Y), which is what an oriented view shows.
+// (right = +X, up = +Y), which is what an oriented view shows. Arrow keys jog
+// X/Y the same way; Page Up / Page Down jog Z.
 //
 // The edge buttons are ordinary `.jog[data-jog]` buttons, so app.js handles
 // their clicks and their enabled/disabled state; this file only keeps their
@@ -61,13 +62,21 @@ window.SurroundJog = {
   },
 
   init() {
-    // Arrow keys press the matching edge button while on the Calibration tab
-    const keys = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    // On the Calibration tab, arrow keys press the matching edge button and
+    // Page Up / Page Down press the side panel's Z+ / Z− buttons.
+    const keys = {
+      ArrowUp: '.edge-jog[data-edge="up"]',
+      ArrowDown: '.edge-jog[data-edge="down"]',
+      ArrowLeft: '.edge-jog[data-edge="left"]',
+      ArrowRight: '.edge-jog[data-edge="right"]',
+      PageUp: '.z-jog .jog[data-jog="Z"][data-dir="1"]',
+      PageDown: '.z-jog .jog[data-jog="Z"][data-dir="-1"]',
+    };
     document.addEventListener('keydown', e => {
-      const edge = keys[e.key];
-      if (!edge || S.tab !== 'calibration' || e.altKey || e.ctrlKey || e.metaKey) return;
+      const selector = keys[e.key];
+      if (!selector || S.tab !== 'calibration' || e.altKey || e.ctrlKey || e.metaKey) return;
       if (e.target.closest('input, textarea, select, [contenteditable], #minicam')) return;
-      const b = document.querySelector(`.edge-jog[data-edge="${edge}"]`);
+      const b = document.querySelector(selector);
       if (!b || b.disabled) return;
       e.preventDefault();
       if (!e.repeat) b.click();
