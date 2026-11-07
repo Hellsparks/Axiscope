@@ -108,6 +108,10 @@
             <h2><i data-icon="camera" data-size="16"></i>Alignment camera</h2>
             <span class="feed-label" id="feed-label-wrap"><i></i><span id="feed-label">NO FEED</span></span>
           </div>
+          <!-- Jog arrows around the camera: click the side you want the nozzle to move towards (js/surround-jog.js) -->
+          <div class="camera-surround">
+          <button type="button" class="jog edge-jog edge-up" data-edge="up" data-jog="Y" data-dir="1"><span class="edge-arrow">↑</span><span class="edge-label">+Y</span></button>
+          <button type="button" class="jog edge-jog edge-left" data-edge="left" data-jog="X" data-dir="-1"><span class="edge-arrow">←</span><span class="edge-label">−X</span></button>
           <div class="camera-viewport" id="camera-viewport">
             <div class="camera-stage" id="camera-stage">
               <img id="camera-img" alt="Live nozzle camera feed">
@@ -127,6 +131,9 @@
             <button type="button" class="align-badge" id="align-badge" hidden title="Show auto alignment details"></button>
             <span class="tool-overlay" id="tool-overlay">T– <span>NO TOOL</span></span>
             <div class="camera-coordinates">X <b id="cc-x">—</b><span></span>Y <b id="cc-y">—</b><span></span>Z <b id="cc-z">—</b></div>
+          </div>
+          <button type="button" class="jog edge-jog edge-right" data-edge="right" data-jog="X" data-dir="1"><span class="edge-arrow">→</span><span class="edge-label">+X</span></button>
+          <button type="button" class="jog edge-jog edge-down" data-edge="down" data-jog="Y" data-dir="-1"><span class="edge-arrow">↓</span><span class="edge-label">−Y</span></button>
           </div>
           <div class="camera-footer">
             <label class="toggle-label"><input id="crosshair-enabled" type="checkbox" role="switch" checked> Crosshair</label>
@@ -380,5 +387,6 @@
 <script src="./js/app.js"></script>
 <script src="./js/vision.js"></script>
 <script src="./js/minicam.js"></script>
+<script src="./js/surround-jog.js"></script>
 </body>
 </html>

@@ -609,6 +609,7 @@ const Vision = {
     setText('check-orientation', m ? 'Redo mapping' : 'Map camera');
     // A camera without a view orientation of its own gets one from the mapping.
     if (m && S.camera && !LS.get('orient:' + S.camera.stream, null)) this.applyOrientation(m, true);
+    if (window.SurroundJog) SurroundJog.update();
   },
 
   // Rotate/flip the camera *view* so +X is right and +Y is up on screen.

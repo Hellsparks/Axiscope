@@ -792,6 +792,7 @@ function renderView() {
   $('contrast').value = v.contrast;
   setText('cam-name', S.camera ? S.camera.name : '—');
   CameraView.applyView();
+  if (window.SurroundJog) SurroundJog.update();
 }
 
 // ------------------------------------------------------------------ actions
