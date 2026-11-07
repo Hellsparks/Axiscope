@@ -235,6 +235,21 @@ def streamer(make_frame):
 app.add_url_rule("/webcam/", "webcam", streamer(jpeg).view_functions["index"])
 
 
+DATABASE = {}
+
+
+# Moonraker database: like the real one with a value in the query string, the
+# value is stored as sent (a string) and a missing key answers 404.
+@app.route("/server/database/item", methods=["GET", "POST"])
+def database_item():
+    ns, key = request.args.get("namespace", ""), request.args.get("key", "")
+    if request.method == "POST":
+        DATABASE.setdefault(ns, {})[key] = request.args.get("value")
+    elif key not in DATABASE.get(ns, {}):
+        return jsonify(error={"code": 404, "message": f"Key '{key}' in namespace '{ns}' not found"}), 404
+    return jsonify(result={"namespace": ns, "key": key, "value": DATABASE[ns][key]})
+
+
 @app.route("/_mock/state")
 def mock_state():
     return jsonify(tool=state["tool"], gcode=gcode_pos(), saved=state["saved_offsets"], true=TRUE_OFFSETS,

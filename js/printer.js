@@ -39,6 +39,24 @@ const Printer = {
 
   info() { return this.get('/server/info', 5000).then(r => r.result); },
 
+  // Moonraker database (persists on the printer, shared by every browser).
+  dbGet(namespace, key) {
+    return this.get('/server/database/item?namespace=' + encodeURIComponent(namespace) + '&key=' + encodeURIComponent(key), 5000)
+      .then(r => r.result.value);
+  },
+
+  // POST with everything in the query string and no body or custom headers is
+  // a CORS "simple request", so it needs no preflight either.
+  async dbSet(namespace, key, value) {
+    const res = await fetch(this.url('/server/database/item?namespace=' + encodeURIComponent(namespace)
+      + '&key=' + encodeURIComponent(key) + '&value=' + encodeURIComponent(value)), { method: 'POST', cache: 'no-store' });
+    if (!res.ok) {
+      let body = null;
+      try { body = await res.json(); } catch (e) { /* non-JSON error page */ }
+      throw new Error(body && body.error ? (body.error.message || body.error) : res.status + ' ' + res.statusText);
+    }
+  },
+
   // Check whether Moonraker answers at `host` without switching to it.
   async probe(host, timeout = 3000) {
     const prev = this.host;

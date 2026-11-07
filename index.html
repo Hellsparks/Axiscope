@@ -251,6 +251,13 @@
               </div>
               <button id="capture" class="primary" type="button"><i data-icon="scope" data-size="17"></i><span id="capture-label">Capture reference</span><span>↵</span></button>
               <p class="capture-hint" id="capture-hint">Offsets are calculated relative to T0</p>
+              <div class="separator"></div>
+              <div class="label-row"><label>Saved camera position</label><span id="campos-source"></span></div>
+              <div class="campos-value" id="campos-value">Not saved yet</div>
+              <div class="campos-actions">
+                <button type="button" class="secondary" id="campos-save">Save current</button>
+                <button type="button" class="secondary" id="campos-goto"><span id="campos-goto-label">Move T0 to camera</span></button>
+              </div>
             </div>
           </section>
           <div id="rail-offsets"></div>
@@ -395,5 +402,6 @@
 <script src="./js/vision.js"></script>
 <script src="./js/minicam.js"></script>
 <script src="./js/surround-jog.js"></script>
+<script src="./js/camera-position.js"></script>
 </body>
 </html>

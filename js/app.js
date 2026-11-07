@@ -279,6 +279,7 @@ async function connect(host, { auto = false } = {}) {
     S.host = host;
     LS.set('host', host);
     loadCaptures();
+    if (window.CameraPosition) CameraPosition.load();
     status.textContent = info.klippy_connected
       ? 'Connected · Klippy ' + info.klippy_state
       : 'Moonraker reachable, but Klippy is ' + info.klippy_state + '. Positions appear once Klipper is ready.';
@@ -780,6 +781,7 @@ function renderBusy() {
   document.querySelectorAll('.jog[data-jog], #tool-tabs button, #tool-select, .machine-btn').forEach(b => { b.disabled = !connected || busy; });
   $('capture').disabled = !connected || busy || activeTool() < 0 || !S.status.pos;
   Vision.renderEligibility();
+  if (window.CameraPosition) CameraPosition.render();
 }
 
 function renderView() {
@@ -863,6 +865,8 @@ function capture() {
   if (tn === 0) {
     S.ref = { x: +p[0].toFixed(3), y: +p[1].toFixed(3), z: +p[2].toFixed(3) };
     notice('Reference captured at X ' + S.ref.x.toFixed(3) + ' Y ' + S.ref.y.toFixed(3) + '. Select another tool to continue.');
+    // The T0 reference is the best camera position there is: remember it for next time
+    if (window.CameraPosition) CameraPosition.save(S.ref, { quiet: true });
   } else {
     const off = S.status.offsets[tn] || { x: 0, y: 0 };
     S.grabs[tn] = { x: +p[0].toFixed(3), y: +p[1].toFixed(3), ox: off.x, oy: off.y };

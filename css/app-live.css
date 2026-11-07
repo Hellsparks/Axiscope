@@ -310,3 +310,10 @@ main { max-width: 2200px; }
 .view-sliders .span-steps { grid-column: 3; }
 .slider-step { border: 0; background: none; color: #c2cbb9; font-size: 18px; line-height: 1; padding: 0; }
 .view-slider-value { grid-column: 5; font: 11px monospace; text-align: right; }
+
+/* Saved camera position (js/camera-position.js) */
+.campos-value { display: flex; align-items: center; gap: 8px; font: 11px monospace; color: #89947d; margin-bottom: 10px; }
+.campos-value b { font-weight: 400; color: #d7dfcd; }
+.campos-value span { height: 10px; width: 1px; background: #444c3a; }
+.campos-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.campos-actions .secondary { justify-content: center; }
