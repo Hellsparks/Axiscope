@@ -15,8 +15,8 @@ window.CameraPosition = {
   KEY: 'camera_position',
   LIFT_MM: 5,          // approach height above the saved Z
   XY_FEED: 6000,       // mm/min
-  Z_FEED: 600,
-  DESCEND_FEED: 120,   // slow final LIFT_MM down to the camera
+  Z_FEED: 3000,        // normal Z travel; Klipper caps it at max_z_velocity
+  DESCEND_FEED: 120,   // slow final LIFT_MM down to the camera (2 mm/s)
 
   pos: null,           // { x, y, z, saved_at }
   source: '',          // 'printer' | 'browser'
