@@ -64,6 +64,7 @@ MAX_SAMPLE_SPREAD = 3.0    # px floor; frames of one measurement must agree
 SAMPLE_SPREAD_FRACTION = 0.03  # ...or within 3% of the main ring radius
 
 MAPPING_CHECK_TOLERANCE = 0.35  # saved mapping: max |observed - expected| / |expected|
+REACH_SCALE_MARGIN = 1.6     # a move can shift the image at most this x the saved px/mm
 
 
 class MappingStore:
@@ -184,6 +185,7 @@ class AutoAligner:
         self._settle_note = ""
         self._focus_searches = 0
         self._focus_origin = None   # Z of the first focus search in this run
+        self._max_px_per_mm = None  # from the saved mapping: bounds how far a move can shift the image
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._thread = None
@@ -256,7 +258,20 @@ class AutoAligner:
         return {"x": float(predicted[0]), "y": float(predicted[1]), "radius": radius,
                 "rings": [r["r"] for r in ref["rings"]]}
 
-    def _wait_stable(self, hint, ref, before, min_departure, lock=None):
+    def _reach_lock(self, ref, centre, move_mm):
+        """Look for the nozzle by its rings, but only as far from `centre` as
+        a move of `move_mm` can shift it. Without this, any circle of the same
+        size (an out-of-focus highlight) anywhere in view is taken for the
+        nozzle. Without a saved scale it falls back to the rings alone."""
+        lock = self._ring_lock(ref)
+        if lock is None or self._max_px_per_mm is None:
+            return lock
+        r_main = max(r["r"] for r in ref["rings"])
+        lock.update(x=float(centre[0]), y=float(centre[1]),
+                    radius=float(self._max_px_per_mm * move_mm + r_main + 10.0))
+        return lock
+
+    def _wait_stable(self, hint, ref, before, min_departure, lock=None, roi=None):
         """After a move, grab frames until the image has caught up with it.
 
         Cameras buffer frames, so the first snapshots after a move can still
@@ -272,7 +287,7 @@ class AutoAligner:
         prev, frames = None, 0
         while time.time() < deadline:
             self._check_cancel()
-            res = detect(self.camera.frame(), self.detect_params, hint=hint, lock=lock, roi=self.roi)
+            res = detect(self.camera.frame(), self.detect_params, hint=hint, lock=lock, roi=roi)
             frames += 1
             b = res["best"]
             if lock and res.get("locked") is False:
@@ -288,24 +303,29 @@ class AutoAligner:
             prev, hint = p, (b["x"], b["y"])
         return frames, False
 
-    def _measure(self, hint=None, ref=None, before=None, min_departure=0.0, lock=None):
+    def _measure(self, hint=None, ref=None, before=None, min_departure=0.0, lock=None,
+                 full_frame=False):
         """Median nozzle centre over several fresh frames, or None.
 
         With `before` set (a move just happened), first wait for the camera
-        image to catch up with the move."""
+        image to catch up with the move. `full_frame` searches the whole
+        image instead of the zoomed-in area.
+        Returns (centre or None, the last detection result that found the
+        nozzle, or the last result when none did)."""
         s = self.settings
+        roi = None if full_frame else self.roi
         self._settle_note = ""
         if before is not None:
-            frames, ok = self._wait_stable(hint, ref, before, min_departure, lock)
+            frames, ok = self._wait_stable(hint, ref, before, min_departure, lock, roi)
             if not ok:
                 self._settle_note = " (image still changing after %.0f s)" % s["stable_timeout"]
             elif frames > 2:
                 self._settle_note = " (camera caught up after %d frames)" % frames
-        pts, last = [], None
+        pts, last, found = [], None, None
         for i in range(s["samples"]):
             self._check_cancel()
             img = self.camera.frame()
-            res = detect(img, self.detect_params, hint=hint, lock=lock, roi=self.roi)
+            res = detect(img, self.detect_params, hint=hint, lock=lock, roi=roi)
             last = res
             b = res["best"]
             if lock and res.get("locked") is False:
@@ -315,6 +335,11 @@ class AutoAligner:
             if b is not None:
                 pts.append((b["x"], b["y"]))
                 hint = (b["x"], b["y"])
+                found = res
+        # A frame can miss the nozzle (edge of the zoomed area, a reflection)
+        # while the others see it; report a frame that did see it.
+        if found is not None:
+            last = found
         with self._lock:
             self._status["frame"] = {"width": last["width"], "height": last["height"]}
             self._status["detection"] = last["best"]
@@ -331,7 +356,8 @@ class AutoAligner:
             if self._can_focus():
                 self._step("focus", "Frames disagree by %.1f px; searching Z for a sharper image." % spread)
                 self._autofocus(med, r_main)
-                return self._measure(hint=(float(med[0]), float(med[1])), ref=ref, lock=lock)
+                return self._measure(hint=(float(med[0]), float(med[1])), ref=ref, lock=lock,
+                                     full_frame=full_frame)
             raise AlignError(
                 "Frames disagree by %.1f px; the camera image is not stable "
                 "(vibration, stale frames or a second circle in view)." % spread)
@@ -441,8 +467,9 @@ class AutoAligner:
             move[axis] = d * sign if sign > 0 else -2.0 * d
             self._move(*move)
             # Expect the image to move at least a few pixels for a probe move.
-            p, _ = self._measure(hint=None, ref=ref, before=p_from, min_departure=3.0,
-                                 lock=self._ring_lock(ref))
+            # Either way the nozzle ends up `d` from p_from (the retry undoes the first probe).
+            p, _ = self._measure(hint=tuple(p_from), ref=ref, before=p_from, min_departure=3.0,
+                                 lock=self._reach_lock(ref, p_from, d))
             if p is not None:
                 return (p - p_from) / (d * sign), p
             self._step("probe_%s" % "xy"[axis],
@@ -528,7 +555,10 @@ class AutoAligner:
         if self.mode == "orient":
             return self._orient(start, p, ref)
 
-        J = self._saved_mapping() if s["reuse_calibration"] else None
+        saved = self._saved_mapping()
+        if saved is not None:
+            self._max_px_per_mm = REACH_SCALE_MARGIN * float(np.max(np.hypot(*saved)))
+        J = saved if s["reuse_calibration"] else None
         check_saved = J is not None
         if J is not None:
             self._step("calibration", "Using saved camera mapping: " + mapping_text(J)
@@ -590,16 +620,30 @@ class AutoAligner:
             expected = J @ move
             predicted = p + expected
             if check_saved:
-                # The prediction comes from the mapping under test, so look for
-                # the nozzle by its rings anywhere instead of where it "should" be.
-                p_new, _ = self._measure(ref=ref, before=p, lock=self._ring_lock(ref),
+                # The prediction comes from the mapping under test, so don't
+                # look where it "should" be; look by its rings anywhere within
+                # reach of this move, in any direction.
+                p_new, _ = self._measure(hint=tuple(p), ref=ref, before=p,
+                                         lock=self._reach_lock(ref, p, float(np.hypot(*move))),
                                          min_departure=3.0)
             else:
                 p_new, _ = self._measure(hint=tuple(predicted), ref=ref, before=p,
                                          lock=self._track_lock(ref, predicted, expected),
                                          min_departure=0.5 * float(np.hypot(*expected)))
             if p_new is None:
-                raise AlignError("Lost the nozzle after correction %d." % corrections)
+                # Tracking missed it: the nozzle may have landed just outside
+                # the zoomed-in area or the tracking window. Look again in a
+                # wider window around the prediction, ignoring the zoomed
+                # area. Never the whole frame: out-of-focus highlights can
+                # have the same ring size as the nozzle.
+                self._step("observe", "Nozzle not where expected after correction %d; "
+                           "searching a wider area around it." % corrections)
+                wide = self._track_lock(ref, predicted, expected)
+                wide["radius"] = 2.0 * wide["radius"] + max(r["r"] for r in ref["rings"])
+                p_new, _ = self._measure(hint=tuple(predicted), ref=ref, lock=wide, full_frame=True)
+            if p_new is None:
+                raise AlignError("Lost the nozzle after correction %d. It is not in the camera "
+                                 "view with the same ring size as before." % corrections)
             if self._focus_searches != searches_before:
                 # Z moved to refocus during this measurement, which can shift
                 # the image too: the motion isn't all from the XY move. Don't

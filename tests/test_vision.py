@@ -581,3 +581,95 @@ def test_refocus_mid_loop_is_not_mistaken_for_xy_motion():
     assert any(m.startswith("Sharpest at Z") for m in msgs)
     assert any(m.startswith("Refocused during this correction") for m in msgs)
     assert abs(rig.z - 5.2) <= 0.03
+
+
+class FlickerRig(SimRig):
+    """Every third frame misses the nozzle, like a ring half outside the
+    zoomed-in area: the scan's last sample finds nothing."""
+
+    def frame(self):
+        img = super().frame()
+        return np.full_like(img, 90) if self.frame_no % 3 == 0 else img
+
+
+def test_scan_survives_a_last_frame_without_the_nozzle():
+    rig = FlickerRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+
+
+class DropoutRig(SimRig):
+    """The camera loses the nozzle for `drop` frames when told to."""
+    drop = 0
+
+    def frame(self):
+        img = super().frame()
+        if self.drop > 0:
+            self.drop -= 1
+            return np.full_like(img, 90)
+        return img
+
+
+def test_lost_after_a_correction_searches_the_whole_frame():
+    rig = DropoutRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, stable_timeout=0))
+    step = a._step
+
+    def drop_on_first_correction(phase, msg, **kw):
+        if phase == "correct" and not any(s["phase"] == "correct" for s in a.snapshot()["steps"]):
+            rig.drop = 3          # the whole tracked measurement sees nothing
+        step(phase, msg, **kw)
+
+    a._step = drop_on_first_correction
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert any("searching a wider area" in s["message"] for s in st["steps"])
+
+
+def test_lost_for_good_still_fails_cleanly():
+    rig = DropoutRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, stable_timeout=0))
+    step = a._step
+
+    def drop_on_first_correction(phase, msg, **kw):
+        if phase == "correct":
+            rig.drop = 10_000     # gone for good
+        step(phase, msg, **kw)
+
+    a._step = drop_on_first_correction
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "Lost the nozzle after correction 1" in st["message"]
+
+
+TWIN = (300.0, 560.0)
+
+
+class TwinRig(SimRig):
+    """A static, crisp circle with the same rings as the nozzle (like an
+    out-of-focus highlight of the same size) elsewhere in view."""
+
+    def frame(self):
+        img = super().frame()
+        twin = render_nozzle(TWIN[0], TWIN[1], self.w, self.h, noise=0.0, seed=0)
+        x0, y0 = int(TWIN[0] - 120), int(TWIN[1] - 120)
+        img[y0:y0 + 240, x0:x0 + 240] = twin[y0:y0 + 240, x0:x0 + 240]
+        return img
+
+
+def test_check_move_does_not_jump_to_a_same_size_circle():
+    store = MappingStore()
+    rig = SimRig()
+    AutoAligner(rig, rig, PARAMS, FAST, camera_key="cam", store=store).run()
+    rig2 = TwinRig(start=(150.35, 149.8))
+    lock = dict(zip(("x", "y"), rig2.nozzle_px()), radius=60)
+    a = AutoAligner(rig2, rig2, PARAMS, dict(FAST, tolerance=0.005), camera_key="cam",
+                    store=store, lock=lock)
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert not any("no longer matches" in s["message"] for s in st["steps"])
+    assert np.hypot(*(rig2.nozzle_px() - [rig2.w / 2, rig2.h / 2])) < 3
