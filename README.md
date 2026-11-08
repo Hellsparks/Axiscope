@@ -78,6 +78,8 @@ zswitch_y_pos: -18.46     # REQUIRED - Y position of the endstop switch
 zswitch_z_pos: 7.8        # REQUIRED - Z position + some clearance of the endstop switch
 lift_z: 1                 # OPTIONAL - Amount to lift Z before moving (default: 1)
 move_speed: 60            # OPTIONAL - XY movement speed in mm/s (default: 60)
+zswitch_approach: direct  # OPTIONAL - how tools travel to the Z switch: direct (one diagonal move, default), x_then_y or y_then_x (line up one axis, then move straight in; use this if a tool clips the camera or other hardware on the way)
+config_file_path: ~/printer_data/config/axiscope.offsets  # OPTIONAL - file "Save to config file" writes tool offsets to (must be [include]d in printer.cfg, or point it at printer.cfg)
 z_move_speed: 10          # OPTIONAL - Z movement speed in mm/s (default: 10)
 start_gcode: 
   {% set tools = printer.toolchanger.tool_numbers %}
@@ -153,21 +155,104 @@ cors_domains:
 
 ### Initial Setup
 
-1. Access the web interface at `http://your-printer-ip:3000`
-2. Select the printer address you are trying to calibrate, ( will most likely be autofiled soon )
-3. Select the camera to use
-   1. Align `T0` perfectly center to the crosair
-   2. Capture Position
-   3. Change to `Tn`
-      1. Re-Align to center and press X and Y in the side navigator 
-      2. From there your new calculated offset should be 
+1. Open `http://your-printer-ip:3000`. Axiscope looks for Moonraker on the same host (port 80 or 7125) and connects on its own. If it can't find it, enter the address under **Setup**.
+2. If the printer has more than one camera, select the nozzle camera under **Setup**.
+
+### Calibrating XY offsets
+
+1. On **Calibration**, home the printer and pick up `T0` with the tool buttons.
+2. Centre the `T0` nozzle on the crosshair, with **Auto align** or by jogging, then press **Capture reference** (or Enter). To jog, click the arrows around the camera (or use the arrow keys or W/A/S/D) to move the nozzle that way on screen; Page Up / Page Down or R / F move Z. The arrows can be hidden under **Setup → Appearance**.
+3. Select `Tn`. Axiscope changes tools and moves the new tool to the captured position.
+4. Centre `Tn` on the crosshair and press **Capture Tn position**. The new offset appears in **Tool offsets**.
+5. Repeat for every tool, then open **Offsets** to review the generated config. Use **Copy config**, or **Save to config file** (this needs `config_file_path`, see below), then run `FIRMWARE_RESTART`.
+
+### Cameras and minicam
+
+**Setup** lists cameras from two sources, so cameras that were never added to Mainsail or Fluidd still appear:
+
+- **Moonraker**: the webcams configured in Mainsail, Fluidd or `moonraker.conf`.
+- **crowsnest**: every `[cam ...]` section in `crowsnest.conf`, read through Moonraker. Axiscope first tries the standard nginx path for the camera's port (8080 → `/webcam/`, 8081 → `/webcam2/`, up to 8083), then the streamer port directly (with `no_proxy: true`). Cameras already in Moonraker's list aren't repeated; unreachable ones are dimmed.
+
+WebRTC cameras are shown through their MJPEG endpoints, because the camera view and detection need individual frames:
+
+- **go2rtc** (Mainsail's *WebRTC (go2rtc)* service, usually port 1984): `…/stream.html?src=cam` becomes `…/api/stream.mjpeg?src=cam`, with snapshots from `…/api/frame.jpeg?src=cam`. go2rtc needs ffmpeg for these if the source isn't already MJPEG.
+- **camera-streamer** in WebRTC mode: `…/webrtc` becomes `…/stream` and `…/snapshot`.
+
+Press **Rescan** after adding or plugging in a camera; the list also refreshes every 15 seconds while Setup is open.
+
+To use a stream from anywhere else, enter it under **Setup → Add a camera by stream URL**. Both full URLs (`http://192.168.1.50:8081/?action=stream`) and paths on the printer (`/webcam3/?action=stream`) work. The stream must be MJPEG with a matching snapshot URL (`?action=snapshot` or `/snapshot`), because detection works on single frames. Added cameras are remembered per printer and can be removed again.
+
+**Minicam** in the top bar opens a second camera, such as a chamber cam, in a floating window over the page:
+
+- Pick its camera from the dropdown in its header.
+- Drag it by the header strip or the video; it snaps to the nearest corner.
+- Resize it from the grip on its inner corner, or focus the grip and use the arrow keys (Shift for bigger steps).
+- Its camera, corner and size are remembered in the browser. Closing it also stops its stream.
+- Under **Vision pipeline** the dropdown also offers what OpenCV sees on the alignment camera, using your current detection settings: *Grayscale*, *Contrast boost (CLAHE)*, *Blurred* (the input to edge detection), *Edges (Canny)* and *Detection* (the frame with the found rings drawn). Keep one of these open while moving the sliders to see what each setting does. These are processed frames from the Axiscope host, about 3–4 per second.
+
+The animations below show the previous interface, but the steps are the same.
 
 <img style="padding-bottom: 10px;" src="media/T0-Aligment.gif" alt="Alt text" width="500"/><br/>
 <img style="padding-bottom: 10px;" src="media/CapturePosChangeT1.gif" alt="Alt text" width="500"/><br/>
 <img style="padding-bottom: 10px;" src="media/GrabOffset.gif" alt="Alt text" width="500"/><br/>
 
+### Auto alignment (OpenCV)
+
+Axiscope can find and centre the nozzle for you. Detection and motion run on the Axiscope host (OpenCV, installed by `install.sh`); the browser only shows the result.
+
+1. Home the printer, pick up a tool and move it roughly over the camera (within about a third of the view).
+2. In **Circle detection**, switch detection on. Tune *Min / Max radius* until the overlay draws dashed rings on the nozzle (orifice and tip face). *Show edge map* under *Advanced tuning* helps with the Canny and blur settings.
+3. Press **Auto align** (or the crosshair button in the middle of the jog pad). Axiscope then:
+   - **Scan**: Canny edge detection, then a search for concentric circles; the centre comes from a joint fit of all rings.
+   - **Probe**: moves 0.5 mm in X and then in Y and compares the images to learn the camera scale, rotation and mirroring. No camera orientation setup is needed.
+   - **Correct and repeat**: moves the nozzle onto the crosshair, re-scans and corrects again until it is within tolerance, at most *N* times.
+4. Check the camera view and confirm with **Accept & capture**, or use **Revert move** or **Run again**. Nothing is captured without your confirmation.
+
+**Picking the right circle.** Live detection locks onto the nozzle and follows it, instead of jumping to whichever circle looks strongest in each frame. If it picks something else (a screw head, a reflection), click the nozzle in the camera image to lock onto it; **Release lock** undoes that. Auto align starts from the locked target and, after every move, only looks where the nozzle should now be.
+
+**Auto-tune.** Press **Auto-tune** to find the detection settings for you. It first identifies the nozzle: your clicked lock if there is one, otherwise it moves X by 0.3 mm and back and keeps the circle whose part of the image changed (screws, reflections and other static circles don't). Then it sets the radius range from the nozzle's rings and tries blur and edge settings on several frames, keeping the one that finds the nozzle most reliably with the steadiest centre and the cleanest edge map. The result is applied and summarised; **Undo auto-tune** restores your previous settings.
+
+**Search only the zoomed-in area** (on by default, under *Advanced tuning*). Zoom in on the nozzle and detection, auto-tune and auto align only look at the visible part of the image. It is faster, nothing outside can be mistaken for the nozzle, and with less to process the detector can work at full camera resolution. Keep enough of the image visible for the probe moves (0.5 mm) to stay in view.
+
+**Camera mapping.** Axiscope needs to know how machine moves look in the camera image (scale, rotation, mirroring). Press **Map camera** once: it moves 0.5 mm in X and in Y, watches where the nozzle goes, moves back, and checks it returns to the same pixel. The result is reported in plain terms ("+X moves the image down, +Y moves it right") and **saved per camera** on the Axiscope host (`~/.config/axiscope/mappings.json`, or `$AXISCOPE_DATA`), so later runs skip the probe moves. If you skip this step, the first Auto align measures and saves the mapping itself.
+
+With a saved mapping, Auto align makes a short first move (at most the probe distance) and compares where the image went with what the mapping predicts. If the camera was bumped, turned or changed resolution, it measures the mapping again automatically. **Redo mapping** forces a fresh measurement, **Forget** deletes it, and *Setup → Use the saved camera mapping* turns the reuse off.
+
+Mapping also turns the camera *view* so +X points right and +Y up on screen, which makes the jog arrows match the picture; the view orientation is remembered per camera. This only changes the display: detection and alignment always use the raw frame. **Rotate** and **Flip H/V** under the camera adjust the view by hand.
+
+If a run behaves oddly, press **Copy log** in the result panel and include it in a bug report; it lists every measurement, the learned mapping and the settings.
+
+Iterations, tolerance, probe distance, safety limit, settle time and speed are under **Setup → Auto alignment**. The learned camera mapping is saved, so only the first run (or **Map camera**) makes the probe moves.
+
+Existing installs: the update manager installs OpenCV automatically if your `[update_manager axiscope]` section has these lines (new installs get them):
+
+```ini
+virtualenv: ~/axiscope/axiscope-env
+requirements: requirements.txt
+```
+
+Otherwise, run `~/axiscope/axiscope-env/bin/pip install numpy opencv-python-headless` once and restart the axiscope service.
+
+### Development without a printer
+
+Install the dependencies once (`pip install -r requirements.txt pytest`), then:
+
+```bash
+python tests/mock_moonraker.py   # simulated toolchanger: Moonraker on 7125, cameras on 18080/18081
+python app.py                    # Axiscope on http://localhost:3000
+```
+
+Opening `http://localhost:3000` connects to the mock by itself. The mock offers three cameras: one listed by Moonraker, one only in its `crowsnest.conf`, and one offline. Its tools have known "true" offsets, and a correct calibration recovers them exactly. Set `CAM_PORT` to move the camera ports if 18080/18081 are taken.
+
+Run the tests with `python -m pytest tests`.
+
 ## Troubleshooting And FAQ
+### "Method not allowed" / a red banner says the service is older than the page
+The page and the Axiscope service update separately: the browser loads the new page right away, but the Python service keeps running its old code until it restarts. Restart it from Mainsail (**Services → axiscope → Restart**) or with `sudo systemctl restart axiscope`, then reload the page. Updates through Moonraker's update manager restart it for you.
+
 ### Camera is not shown in Axiscope
+Press **Rescan** under **Setup**. Axiscope reads both Moonraker's webcam list and `crowsnest.conf`. If a crowsnest camera shows as *not reachable*, its port has no nginx path and the streamer only listens locally: set `no_proxy: true` for that camera in `crowsnest.conf`, or add its stream with **Add a camera by stream URL**.
+
 The camera needs to be configured and also configured in mainsail
 This following links will guide you thru installing and configuring the camera in crowsness and fluid and mainsail
 

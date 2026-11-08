@@ -1,16 +1,277 @@
+import base64
 import os
+import threading
+import time
+
 from flask.app import Flask
+from flask.globals import request
 from flask.helpers import send_from_directory
+from flask.json import jsonify
+from flask.wrappers import Response
+
+try:
+    import cv2
+    from axiscope_vision.align import AlignError, AutoAligner, MappingStore, describe_mapping
+    from axiscope_vision.detect import PIPELINE_STAGES, crop_roi, detect, orient_view, pipeline_view
+    from axiscope_vision.hardware import HardwareError, MoonrakerPrinter, SnapshotCamera
+    from axiscope_vision.tune import TuneError, autotune
+    VISION_ERROR = None
+except ImportError as e:  # the manual UI keeps working without OpenCV
+    cv2 = None
+    VISION_ERROR = str(e)
 
 app = Flask(__name__)
+
+# What this backend can do. The page compares it with what it needs, so an
+# updated page talking to a not-yet-restarted service says so plainly.
+API_FEATURES = ['detect', 'align', 'orient', 'lock', 'mapping', 'vision_frame', 'autotune', 'roi', 'focus']
+
+# Learned camera mappings live outside the git checkout, so Moonraker's
+# update manager never sees a dirty repo.
+DATA_DIR = os.path.expanduser(os.environ.get('AXISCOPE_DATA', '~/.config/axiscope'))
+MAPPINGS = MappingStore(os.path.join(DATA_DIR, 'mappings.json')) if VISION_ERROR is None else None
+
+_job_lock = threading.Lock()
+_job = None
+
 
 @app.route('/')
 def serve_index():
     return send_from_directory('.', 'index.html')
 
+
 @app.route('/<path:path>')
 def serve_files(path):
     return send_from_directory('.', path)
+
+
+@app.after_request
+def _no_stale_ui(resp):
+    # Browsers otherwise cache index.html/JS heuristically and keep running an
+    # old UI after an update. no-cache still allows cheap 304 revalidation.
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+
+def _error(message, status=400):
+    return jsonify({'error': message}), status
+
+
+def _vision_required():
+    if VISION_ERROR:
+        return _error('OpenCV is not installed on the Axiscope host (%s). '
+                      'Re-run install.sh or pip install opencv-python-headless numpy.'
+                      % VISION_ERROR, 503)
+    return None
+
+
+@app.route('/api/status')
+def api_status():
+    with _job_lock:
+        job = _job.snapshot() if _job else None
+    return jsonify({
+        'opencv': VISION_ERROR is None,
+        'opencv_version': cv2.__version__ if cv2 else None,
+        'error': VISION_ERROR,
+        'features': API_FEATURES,
+        'align': job,
+    })
+
+
+@app.route('/api/detect', methods=['POST'])
+def api_detect():
+    err = _vision_required()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    try:
+        img = SnapshotCamera(body.get('camera_url')).frame()
+    except HardwareError as e:
+        return _error(str(e), 502)
+    hint = body.get('hint')
+    lock = body.get('lock') if isinstance(body.get('lock'), dict) else None
+    res = detect(img, body.get('params'), hint=tuple(hint) if hint else None,
+                 want_edges=bool(body.get('edges')), lock=lock, roi=body.get('roi'))
+    if res.get('edges_jpeg') is not None:
+        res['edges'] = 'data:image/jpeg;base64,' + base64.b64encode(res.pop('edges_jpeg')).decode()
+    res.pop('edges_jpeg', None)
+    return jsonify(res)
+
+
+@app.route('/api/vision/frame', methods=['POST'])
+def api_vision_frame():
+    """One JPEG of a detection pipeline stage, for watching the tuning live."""
+    err = _vision_required()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    stage = body.get('stage', 'edges')
+    if stage not in PIPELINE_STAGES:
+        return _error('stage must be one of: ' + ', '.join(PIPELINE_STAGES))
+    try:
+        img = SnapshotCamera(body.get('camera_url')).frame()
+    except HardwareError as e:
+        return _error(str(e), 502)
+    lock = body.get('lock') if isinstance(body.get('lock'), dict) else None
+    view = pipeline_view(img, body.get('params'), stage, lock=lock, roi=body.get('roi'))
+    view = orient_view(view, body.get('view') if isinstance(body.get('view'), dict) else None)
+    ok, jpg = cv2.imencode('.jpg', view, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ok:
+        return _error('Could not encode the image', 500)
+    return Response(jpg.tobytes(), mimetype='image/jpeg')
+
+
+TUNE_MOVE_MM = 0.3
+
+
+def _frames(camera, n, gap=0.15):
+    out = []
+    for i in range(n):
+        if i:
+            time.sleep(gap)
+        out.append(camera.frame())
+    return out
+
+
+@app.route('/api/autotune', methods=['POST'])
+def api_autotune():
+    """Tune the detection settings on live frames. Without a locked target
+    (and with a homed printer) it moves X by 0.3 mm and back, so circles that
+    move with the toolhead can be told apart from ones that don't."""
+    err = _vision_required()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    with _job_lock:
+        if _job is not None and _job.running:
+            return _error('An alignment is running; try again when it has finished.', 409)
+    lock = body.get('lock') if isinstance(body.get('lock'), dict) else None
+    try:
+        camera = SnapshotCamera(body.get('camera_url'))
+        frames = _frames(camera, 3)
+        moved, moved_note = None, None
+        if not (lock and lock.get('x') is not None) and body.get('printer') and body.get('move', True):
+            printer = MoonrakerPrinter(body['printer'])
+            homed = printer.homed_axes()
+            if 'x' in homed and 'y' in homed:
+                printer.move_relative(TUNE_MOVE_MM, 0, 10.0, 0.0)
+                try:
+                    time.sleep(0.6)
+                    camera.frame()                     # drop a possibly stale frame
+                    moved = _frames(camera, 2)
+                finally:
+                    printer.move_relative(-TUNE_MOVE_MM, 0, 10.0, 0.0)
+            else:
+                moved_note = 'Printer not homed, so autotune could not move to identify the nozzle.'
+        roi = body.get('roi')
+        full_w, full_h = frames[0].shape[1], frames[0].shape[0]
+        crops = [crop_roi(f, roi) for f in frames]
+        ox, oy = crops[0][1]
+        frames = [c[0] for c in crops]
+        if moved:
+            moved = [crop_roi(f, roi)[0] for f in moved]
+        if lock and lock.get('x') is not None and (ox or oy):
+            lock = dict(lock, x=float(lock['x']) - ox, y=float(lock['y']) - oy)
+        result = autotune(frames, body.get('params'), lock=lock, moved_frames=moved)
+        result['target']['x'] = round(result['target']['x'] + ox, 2)
+        result['target']['y'] = round(result['target']['y'] + oy, 2)
+        if ox or oy or frames[0].shape[1] != full_w:
+            result['roi'] = [ox, oy, ox + frames[0].shape[1], oy + frames[0].shape[0]]
+    except HardwareError as e:
+        return _error(str(e), 502)
+    except TuneError as e:
+        return _error(str(e), 422)
+    result['moved'] = moved is not None
+    if moved_note:
+        result['note'] = moved_note
+    return jsonify(result)
+
+
+@app.route('/api/align/start', methods=['POST'])
+def api_align_start():
+    global _job
+    err = _vision_required()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    with _job_lock:
+        if _job is not None and _job.running:
+            return _error('An alignment is already running.', 409)
+        try:
+            camera_url = body.get('camera_url')
+            job = AutoAligner(
+                MoonrakerPrinter(body.get('printer')),
+                SnapshotCamera(camera_url),
+                detect_params=body.get('params'),
+                settings=body.get('settings'),
+                target=body.get('target'),
+                camera_key=camera_url,
+                tool=body.get('tool'),
+                mode=body.get('mode', 'align'),
+                lock=body.get('lock'),
+                store=MAPPINGS,
+                roi=body.get('roi'),
+            )
+        except HardwareError as e:
+            return _error(str(e))
+        _job = job
+        job.start()
+    return jsonify(job.snapshot())
+
+
+def _mapping_key():
+    # Same key the aligner uses: the snapshot URL the UI sends as camera_url.
+    return request.args.get('camera') or (request.get_json(silent=True) or {}).get('camera')
+
+
+@app.route('/api/mapping', methods=['GET', 'DELETE'])
+def api_mapping():
+    """The saved camera mapping for ?camera=<snapshot url> (GET), or forget it (DELETE)."""
+    err = _vision_required()
+    if err:
+        return err
+    key = _mapping_key()
+    if not key:
+        return _error('camera is required')
+    if request.method == 'DELETE':
+        return jsonify({'deleted': MAPPINGS.delete(key)})
+    entry = MAPPINGS.get(key)
+    if not entry:
+        return jsonify({'mapping': None})
+    import numpy as np
+    info = describe_mapping(np.array(entry['matrix']))
+    info.update(frame=entry['frame'], saved_at=entry['saved_at'])
+    return jsonify({'mapping': info})
+
+
+@app.route('/api/align/status')
+def api_align_status():
+    with _job_lock:
+        if _job is None:
+            return jsonify({'state': 'idle'})
+        return jsonify(_job.snapshot())
+
+
+@app.route('/api/align/cancel', methods=['POST'])
+def api_align_cancel():
+    with _job_lock:
+        if _job is not None:
+            _job.cancel()
+            return jsonify(_job.snapshot())
+    return jsonify({'state': 'idle'})
+
+
+@app.route('/api/align/revert', methods=['POST'])
+def api_align_revert():
+    with _job_lock:
+        job = _job
+    if job is None or job.running:
+        return _error('No finished alignment to revert.', 409)
+    try:
+        return jsonify({'position': job.revert()})
+    except (AlignError, HardwareError) as e:
+        return _error(str(e), 502)
+
 
 if __name__ == '__main__':
     try:

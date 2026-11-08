@@ -1,0 +1,675 @@
+"""Detector and auto-align tests on synthetic images. Run: python -m pytest tests"""
+import os
+import sys
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from synthetic import SimRig, render_nozzle  # noqa: E402
+from axiscope_vision.align import AutoAligner, merge_settings  # noqa: E402
+from axiscope_vision.detect import detect, merge_params  # noqa: E402
+
+PARAMS = {"max_radius": 150}
+FAST = {"settle": 0}
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_detects_concentric_centre_subpixel(seed):
+    rng = np.random.default_rng(seed)
+    cx, cy = rng.uniform(200, 1080), rng.uniform(150, 570)
+    best = detect(render_nozzle(cx, cy, seed=seed), PARAMS)["best"]
+    assert best is not None and best["concentric"]
+    assert len(best["rings"]) >= 2
+    assert np.hypot(best["x"] - cx, best["y"] - cy) < 0.3
+
+
+@pytest.mark.parametrize("kind", ["blank", "noise", "texture"])
+def test_rejects_frames_without_nozzle(kind):
+    import cv2
+    rng = np.random.default_rng(3)
+    if kind == "blank":
+        img = np.full((720, 1280, 3), 60, np.uint8)
+    else:
+        img = rng.integers(0, 255, (720, 1280, 3), dtype=np.uint8)
+        if kind == "texture":
+            img = cv2.GaussianBlur(img, (0, 0), 3)
+    assert detect(img, PARAMS)["best"] is None
+
+
+def test_single_ring_needs_opt_in():
+    # Orifice only, no face ring: a single circle.
+    img = render_nozzle(640, 360, r_tip=1, r_face=1, r_hole=40, seed=1)
+    assert detect(img, PARAMS)["best"] is None
+    best = detect(img, dict(PARAMS, require_concentric=False))["best"]
+    assert best is not None and np.hypot(best["x"] - 640, best["y"] - 360) < 0.5
+
+
+def test_param_validation_clamps():
+    p = merge_params({"min_radius": 50, "max_radius": 10, "canny_low": "x", "bogus": 1})
+    assert p["max_radius"] > p["min_radius"]
+    assert p["canny_low"] == 40 and "bogus" not in p
+    s = merge_settings({"max_iterations": 999, "tolerance": -1})
+    assert s["max_iterations"] == 25 and s["tolerance"] == 0.001
+
+
+@pytest.mark.parametrize("rig_kw", [
+    {},
+    {"angle_deg": -95, "mirror": False, "px_per_mm": 250},
+    {"angle_deg": 180, "mirror": True, "px_per_mm": 500, "start": (150.2, 149.9)},
+    {"backlash": 0.03, "start": (150.3, 149.8)},
+])
+def test_autoalign_converges_for_any_camera_orientation(rig_kw):
+    rig = SimRig(**rig_kw)
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    true_err = np.hypot(*(rig.nozzle_px() - [rig.w / 2, rig.h / 2])) / rig.A[0].dot(rig.A[0]) ** 0.5
+    assert true_err < 0.006
+    # Probe X, probe Y, then at most a couple of corrections.
+    assert st["result"]["corrections"] <= 3
+
+
+class NoisyMoves(SimRig):
+    """Every move lands up to 20 um off target: the loop can never reach 1 um."""
+
+    def move_relative(self, dx, dy, feed, approach):
+        jitter = np.random.default_rng(len(self.moves)).uniform(-0.02, 0.02, 2)
+        super().move_relative(dx + jitter[0], dy + jitter[1], feed, approach)
+
+
+def test_autoalign_stops_after_max_iterations():
+    rig = NoisyMoves()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.001, max_iterations=3))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "not_converged"
+    assert st["result"]["corrections"] == 3
+    assert len(rig.moves) == 2 + 3  # two probes + N corrections, nothing more
+
+
+def test_autoalign_refuses_large_corrections():
+    rig = SimRig(start=(150.4, 149.7))
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, max_move=0.2))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "safety limit" in st["message"]
+
+
+def test_autoalign_requires_homing():
+    rig = SimRig()
+    rig.homed_axes = lambda: "z"
+    a = AutoAligner(rig, rig, PARAMS, FAST)
+    a.run()
+    assert a.snapshot()["state"] == "failed"
+    assert rig.moves == []
+
+
+def test_autoalign_fails_cleanly_without_nozzle():
+    rig = SimRig(start=(152.0, 150.0))  # 2 mm away: outside the field of view
+    a = AutoAligner(rig, rig, PARAMS, FAST)
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "No nozzle" in st["message"]
+    assert rig.moves == []
+
+
+def test_probe_retries_opposite_direction_near_edge():
+    # Nozzle near the right edge: +X probe pushes it out of view (mapping has +x -> +px).
+    rig = SimRig(start=(151.5, 150.0), angle_deg=0, mirror=False, px_per_mm=380)
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, max_move=3.0))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert any("other side" in s["message"] for s in st["steps"])
+
+
+def test_reuse_calibration_skips_probe_moves():
+    rig = SimRig()
+    AutoAligner(rig, rig, PARAMS, FAST, camera_key="cam").run()
+    rig2 = SimRig(start=(150.3, 149.8))
+    a = AutoAligner(rig2, rig2, PARAMS, dict(FAST, reuse_calibration=True), camera_key="cam")
+    a.run()
+    assert a.snapshot()["state"] == "converged"
+    assert len(rig2.moves) == a.snapshot()["result"]["corrections"]
+
+
+def test_cancel_and_revert():
+    rig = SimRig()
+    a = AutoAligner(rig, rig, PARAMS, FAST)
+    a.cancel()
+    a.run()
+    assert a.snapshot()["state"] == "cancelled"
+    rig2 = SimRig()
+    a2 = AutoAligner(rig2, rig2, PARAMS, FAST)
+    a2.run()
+    start = a2.snapshot()["start_position"]
+    a2.revert()
+    assert np.allclose(rig2.position()[:2], start[:2])
+
+
+@pytest.mark.parametrize("angle", [0, 90, 180, 270])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_autoalign_any_quarter_turn_camera(angle, mirror):
+    # e.g. a camera mounted 90 deg: X- moves the image down.
+    rig = SimRig(angle_deg=angle, mirror=mirror, start=(150.3, 149.8))
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    m = st["result"]["mapping"]
+    assert m["mirrored"] == mirror
+    assert any("+X moves the image" in s["message"] for s in st["steps"])
+
+
+class LaggyCamera(SimRig):
+    """After every move the camera keeps serving the old picture for a few frames."""
+
+    def __init__(self, lag=3, **kw):
+        super().__init__(**kw)
+        self.lag = lag
+        self.stale = None
+        self.stale_left = 0
+
+    def _go(self, target):
+        if self.stale_left == 0:
+            self.stale = self.nozzle_px()
+        self.stale_left = self.lag
+        super()._go(target)
+
+    def frame(self):
+        if self.stale_left > 0:
+            self.stale_left -= 1
+            self.frame_no += 1
+            from synthetic import render_nozzle
+            return render_nozzle(*self.stale, self.w, self.h, seed=self.seed + self.frame_no)
+        return super().frame()
+
+
+def test_autoalign_waits_for_lagging_camera():
+    rig = LaggyCamera(lag=3, angle_deg=90, start=(150.3, 149.8))
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert abs(st["result"]["mapping"]["px_per_mm"] - 380) < 10   # learned from fresh frames
+    assert st["result"]["corrections"] <= 3
+
+
+def test_lagging_camera_without_wait_is_caught_not_wandering():
+    # With the wait disabled the stale frames corrupt the mapping; the run
+    # must end in a clear state, never by drifting off unchecked.
+    rig = LaggyCamera(lag=3, angle_deg=90, start=(150.3, 149.8))
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005, stable_timeout=0, max_move=1.0))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] in ("failed", "converged", "not_converged")
+    assert np.hypot(*(rig.pos - np.array([150.3, 149.8]))) < 2.0
+
+
+class WrongWay(SimRig):
+    """After the probes, the printer moves the opposite way (as if axes were swapped)."""
+
+    def move_relative(self, dx, dy, feed, approach):
+        if len(self.moves) >= 2:
+            dx, dy = -dx * 2.5, -dy * 2.5
+        super().move_relative(dx, dy, feed, approach)
+
+
+def test_stops_when_corrections_make_it_worse():
+    rig = WrongWay(start=(150.05, 149.97))
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.002, max_iterations=10, max_move=3.0))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed"
+    assert "worse" in st["message"] or "safety" in st["message"] or "Lost" in st["message"]
+    assert len(rig.moves) <= 2 + 4   # stopped early, did not use all 10 corrections
+
+
+@pytest.mark.parametrize("angle,mirror,x_dir,y_dir", [
+    (0, True, "right", "up"),      # image y points down, so mirrored Y = "up"
+    (90, True, "down", "right"),   # the reported case: X- moves the image up/down
+    (90, False, "down", "left"),
+    (180, False, "left", "up"),
+])
+def test_orient_reports_directions_and_returns_home(angle, mirror, x_dir, y_dir):
+    rig = SimRig(angle_deg=angle, mirror=mirror, start=(150.2, 149.9))
+    start = rig.position()
+    a = AutoAligner(rig, rig, PARAMS, FAST, mode="orient")
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "calibrated", st["message"]
+    m = st["result"]["mapping"]
+    assert (m["x_dir"], m["y_dir"]) == (x_dir, y_dir)
+    assert st["result"]["consistent"]
+    assert np.allclose(rig.position()[:2], start[:2], atol=1e-6)   # back where it started
+
+
+def test_tracking_survives_rings_appearing_at_frame_edge():
+    # Reported case: 90 deg camera, the outer ring is clipped by the frame edge
+    # at the start and comes into view after the probe move.
+    rig = SimRig(angle_deg=90, mirror=True, start=(150.25, 149.8))
+    a = AutoAligner(rig, rig, PARAMS, FAST)
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+
+
+# --- target lock: a stronger circle elsewhere must not steal the target ---
+import cv2  # noqa: E402
+
+DECOY = (1050.0, 180.0)
+
+
+def add_decoy(img):
+    # A static, high-contrast concentric target (e.g. a screw head) with more
+    # rings than the nozzle, so it outscores it when nothing is locked.
+    for r, v in ((70, 230), (52, 20), (36, 230), (22, 20), (10, 230)):
+        cv2.circle(img, (int(DECOY[0]), int(DECOY[1])), r, (v, v, v), -1, cv2.LINE_AA)
+    return img
+
+
+class DecoyRig(SimRig):
+    def frame(self):
+        return add_decoy(super().frame())
+
+
+def test_unlocked_detection_prefers_the_decoy():
+    img = add_decoy(render_nozzle(500, 420, seed=3))
+    best = detect(img, PARAMS)["best"]
+    assert np.hypot(best["x"] - DECOY[0], best["y"] - DECOY[1]) < 3   # the problem
+
+
+def test_lock_keeps_the_nozzle_over_a_stronger_circle():
+    img = add_decoy(render_nozzle(500, 420, seed=3))
+    out = detect(img, PARAMS, lock={"x": 505, "y": 415, "radius": 60})
+    assert out["locked"] is True
+    assert np.hypot(out["best"]["x"] - 500, out["best"]["y"] - 420) < 0.5
+    # A lock on ring sizes alone (no position) also picks the nozzle.
+    out = detect(img, PARAMS, lock={"rings": [16, 55, 90]})
+    assert np.hypot(out["best"]["x"] - 500, out["best"]["y"] - 420) < 0.5
+
+
+def test_lock_lost_falls_back_and_reports_it():
+    img = add_decoy(render_nozzle(500, 420, seed=3))
+    out = detect(img, PARAMS, lock={"x": 200, "y": 600, "radius": 40})
+    assert out["locked"] is False and out["best"] is not None
+
+
+def test_autoalign_stays_on_locked_nozzle_with_decoy_in_view():
+    rig = DecoyRig(start=(150.3, 149.8))
+    p0 = rig.nozzle_px()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005),
+                    lock={"x": float(p0[0]), "y": float(p0[1]), "radius": 60})
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert np.hypot(*(rig.nozzle_px() - [rig.w / 2, rig.h / 2])) < 3
+
+
+def test_probe_out_of_view_with_decoy_retries_instead_of_taking_decoy():
+    # Reported sequence: nozzle near the frame edge, a stronger circle in view.
+    # The +X probe pushes the nozzle out; the run must not jump to the decoy.
+    rig = DecoyRig(angle_deg=90, mirror=True, start=(150.7, 149.8))
+    p0 = rig.nozzle_px()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005),
+                    lock={"x": float(p0[0]), "y": float(p0[1]), "radius": 60})
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert any("other side" in s["message"] for s in st["steps"])
+    assert np.hypot(*(rig.nozzle_px() - [rig.w / 2, rig.h / 2])) < 3
+
+
+# --- saved camera mapping ---
+from axiscope_vision.align import MappingStore  # noqa: E402
+
+
+def test_mapping_store_persists_to_disk(tmp_path):
+    path = str(tmp_path / "sub" / "mappings.json")
+    MappingStore(path).set("cam", [[380.0, 0.0], [0.0, -380.0]], (1280, 720))
+    entry = MappingStore(path).get("cam")
+    assert entry["matrix"] == [[380.0, 0.0], [0.0, -380.0]] and entry["frame"] == [1280, 720]
+    assert MappingStore(path).delete("cam") and MappingStore(path).get("cam") is None
+
+
+def test_saved_mapping_skips_probes_and_is_refreshed_when_stale():
+    store = MappingStore()
+    rig = SimRig(angle_deg=90, mirror=True)
+    AutoAligner(rig, rig, PARAMS, FAST, camera_key="cam", store=store).run()
+    saved = np.array(store.get("cam")["matrix"])
+    # Second tool: the saved mapping is used, no probe moves.
+    rig2 = SimRig(angle_deg=90, mirror=True, start=(150.3, 149.8))
+    a = AutoAligner(rig2, rig2, PARAMS, dict(FAST, tolerance=0.005), camera_key="cam", store=store)
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert any("Using saved camera mapping" in s["message"] for s in st["steps"])
+    assert not any(s["phase"].startswith("probe") for s in st["steps"])
+    # Camera turned 90 degrees since: the check step notices and re-maps.
+    rig3 = SimRig(angle_deg=0, mirror=True, start=(150.3, 149.8))
+    a = AutoAligner(rig3, rig3, PARAMS, dict(FAST, tolerance=0.005), camera_key="cam", store=store)
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert any("no longer matches" in s["message"] for s in st["steps"])
+    assert not np.allclose(np.array(store.get("cam")["matrix"]), saved, atol=20)
+    # The check step was capped to the probe distance.
+    assert np.hypot(*rig3.moves[0]) <= 0.5 + 1e-9
+
+
+def test_saved_mapping_ignored_at_other_resolution():
+    store = MappingStore()
+    store.set("cam", [[380.0, 0.0], [0.0, -380.0]], (1920, 1080))
+    rig = SimRig(mirror=True, start=(150.3, 149.8))     # 1280x720
+    a = AutoAligner(rig, rig, PARAMS, FAST, camera_key="cam", store=store)
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged"
+    assert any(s["phase"] == "probe_x" for s in st["steps"])
+    assert store.get("cam")["frame"] == [1280, 720]
+
+
+def test_pipeline_view_stages():
+    from axiscope_vision.detect import PIPELINE_STAGES, pipeline_view
+    img = render_nozzle(640, 360, seed=2)
+    for stage in PIPELINE_STAGES:
+        v = pipeline_view(img, PARAMS, stage)
+        assert v.shape[1] == 960 and v.shape[0] == 540, stage   # processing scale
+    edges = pipeline_view(img, PARAMS, "edges")
+    assert set(np.unique(edges)) <= {0, 255} and edges.any()
+    # The detection view draws the rings: it differs from the plain frame.
+    det = pipeline_view(img, PARAMS, "detection")
+    plain = cv2.resize(img, (960, 540), interpolation=cv2.INTER_AREA)
+    assert np.abs(det.astype(int) - plain).sum() > 0
+
+
+# --- autotune ---
+from axiscope_vision.tune import TuneError, autotune  # noqa: E402
+
+
+def noisy_frames(cx, cy, n=3, noise=18):
+    return [render_nozzle(cx, cy, noise=noise, seed=40 + i) for i in range(n)]
+
+
+def test_autotune_fixes_settings_that_fail_on_a_noisy_camera():
+    frames = noisy_frames(600, 380)
+    d = detect(frames[0], PARAMS)["best"]                    # defaults miss or misplace it here
+    assert d is None or np.hypot(d["x"] - 600, d["y"] - 380) > 3
+    res = autotune(frames, PARAMS, lock={"x": 602, "y": 377})
+    p = res["params"]
+    assert res["quality"]["found"] == 3
+    best = detect(noisy_frames(600, 380, n=1, noise=18)[0], p)["best"]
+    assert best is not None and np.hypot(best["x"] - 600, best["y"] - 380) < 1.0
+    assert p["min_radius"] < 55 and p["max_radius"] >= 90   # brackets the main rings (55, 90)
+
+
+def test_autotune_uses_motion_to_reject_a_static_decoy():
+    frames = [add_decoy(render_nozzle(500, 420, seed=50 + i)) for i in range(3)]
+    moved = [add_decoy(render_nozzle(500, 420 + 0.3 * 380, seed=60 + i)) for i in range(2)]
+    res = autotune(frames, PARAMS, moved_frames=moved)
+    assert "moved" in res["target"]["how"] and "stayed put" in res["target"]["how"]
+    assert np.hypot(res["target"]["x"] - 500, res["target"]["y"] - 420) < 1.0
+
+
+def test_autotune_without_any_circle_says_so():
+    blank = [np.full((720, 1280, 3), 60, np.uint8)] * 3
+    with pytest.raises(TuneError):
+        autotune(blank, PARAMS)
+
+
+def test_autotune_recovers_from_unusable_current_settings():
+    frames = [add_decoy(render_nozzle(500, 420, seed=70 + i)) for i in range(3)]
+    moved = [add_decoy(render_nozzle(500, 420 + 0.3 * 380, seed=80 + i)) for i in range(2)]
+    bad = {"min_radius": 2, "max_radius": 600, "canny_low": 5, "canny_high": 30, "blur": 0}
+    res = autotune(frames, bad, moved_frames=moved)
+    assert np.hypot(res["target"]["x"] - 500, res["target"]["y"] - 420) < 1.0
+    assert res["quality"]["found"] == 3
+
+
+# --- region of interest (zoomed-in area) ---
+def test_roi_results_are_in_full_frame_coordinates_and_ignore_outside():
+    img = add_decoy(render_nozzle(500, 420, seed=5))
+    full = detect(img, PARAMS)["best"]
+    assert np.hypot(full["x"] - DECOY[0], full["y"] - DECOY[1]) < 3        # decoy wins full-frame
+    out = detect(img, PARAMS, roi=[300, 220, 700, 620])                    # zoomed on the nozzle
+    b = out["best"]
+    assert out["roi"] == [300, 220, 700, 620] and out["width"] == 1280
+    assert np.hypot(b["x"] - 500, b["y"] - 420) < 0.5                      # decoy outside is ignored
+
+
+def test_roi_of_2x_zoom_keeps_full_resolution():
+    img = render_nozzle(640.3, 360.7, seed=6)
+    out = detect(img, PARAMS, roi=[320, 180, 960, 540])                    # 640 px wide: no downscale
+    assert out["scale"] == 1.0
+    assert np.hypot(out["best"]["x"] - 640.3, out["best"]["y"] - 360.7) < 0.3
+
+
+def test_roi_whole_frame_or_tiny_is_ignored():
+    img = render_nozzle(640, 360, seed=7)
+    assert "roi" not in detect(img, PARAMS, roi=[0, 0, 1280, 720])
+    assert "roi" not in detect(img, PARAMS, roi=[600, 300, 620, 320])     # too small to be useful
+
+
+def test_autoalign_within_roi_ignores_decoy_without_lock():
+    rig = DecoyRig(start=(150.2, 149.85))
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005), roi=[240, 60, 1040, 660])
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert np.hypot(*(rig.nozzle_px() - [rig.w / 2, rig.h / 2])) < 3
+
+
+def test_orient_view_matches_css_order():
+    from axiscope_vision.detect import orient_view
+    img = np.zeros((2, 3), np.uint8)
+    img[0, 0] = 255                      # top-left marker
+    # 90 deg clockwise: top-left goes to top-right, image becomes 3x2.
+    r = orient_view(img, {"rotate": 90})
+    assert r.shape == (3, 2) and r[0, 1] == 255
+    # Flip H first (marker to top-right), then 90 cw: marker ends bottom-right.
+    r = orient_view(img, {"rotate": 90, "flipH": True})
+    assert r[2, 1] == 255
+
+
+# --------------------------------------------------------------- auto focus
+class FocusRig(SimRig):
+    """A camera with a shallow depth of field: away from focus_z the image
+    blurs and the detected centre wobbles from frame to frame (soft ring
+    edges), which fails the "frames disagree" check until Z is refocused."""
+
+    def __init__(self, z=5.0, focus_z=5.31, vibration=0.0, **kw):
+        super().__init__(**kw)
+        self.z, self.focus_z = z, focus_z
+        self.vibration = vibration   # px of wobble that no focus height fixes
+        self.z_moves = []
+        self.rng = np.random.default_rng(7)
+
+    def position(self):
+        return [float(self.pos[0]), float(self.pos[1]), float(self.z)]
+
+    def move_z_absolute(self, z, feed):
+        self.z_moves.append(z)
+        self.z = z
+
+    def frame(self):
+        self.frame_no += 1
+        defocus = abs(self.z - self.focus_z)
+        wobble = 8.0 * max(0.0, defocus - 0.03) / 0.3 + self.vibration
+        jx, jy = self.rng.normal(0, wobble, 2) if wobble else (0.0, 0.0)
+        x, y = self.nozzle_px()
+        img = render_nozzle(x + jx, y + jy, self.w, self.h, seed=self.seed + self.frame_no)
+        return cv2.GaussianBlur(img, (0, 0), 0.3 + 2.5 * defocus)
+
+
+def test_autofocus_rescues_unstable_frames_and_converges():
+    rig = FocusRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert abs(rig.z - rig.focus_z) <= 0.03          # parked near the sharpest height
+    assert all(abs(z - 5.0) <= 0.5 + 1e-9 for z in rig.z_moves)   # never beyond focus_range
+    focus = [s["message"] for s in st["steps"] if s["phase"] == "focus"]
+    assert focus and focus[-1].startswith("Sharpest at Z")
+
+
+def test_autofocus_off_keeps_the_old_failure():
+    rig = FocusRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, focus_range=0))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "Frames disagree" in st["message"]
+    assert rig.z_moves == []
+
+
+def test_autofocus_gives_up_when_refocusing_does_not_help():
+    rig = FocusRig(vibration=6.0)                     # wobble that no Z height fixes
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, focus_range=0.35))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "Frames disagree" in st["message"]
+    # The first search ends near 5.30; the second must still stay within
+    # 0.35 mm of the original 5.0, not of where the first one ended.
+    assert all(abs(z - 5.0) <= 0.35 + 1e-9 for z in rig.z_moves)
+    assert sum(1 for s in st["steps"] if s["phase"] == "focus" and s["message"].startswith("Frames")) <= 2
+
+
+def test_revert_restores_z_after_autofocus():
+    rig = FocusRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST))
+    a.run()
+    assert a.snapshot()["state"] == "converged"
+    a.revert()
+    assert rig.position() == pytest.approx([150.4, 149.7, 5.0])
+
+
+def test_focus_settings_are_clamped():
+    s = merge_settings({"focus_range": 9, "focus_step": 0})
+    assert s["focus_range"] == 2.0 and s["focus_step"] == 0.002
+
+
+
+class DriftingFocus(FocusRig):
+    """In focus at the start; after the first correction the focus height
+    drifts, and Z shifts the image (a slightly tilted camera), so a refocus
+    lands in the middle of the correction loop."""
+
+    def __init__(self, tilt_px_per_mm=(40.0, -25.0), **kw):
+        super().__init__(z=5.0, focus_z=5.0, **kw)
+        self.tilt = np.array(tilt_px_per_mm)
+
+    def move_relative(self, dx, dy, feed, approach):
+        super().move_relative(dx, dy, feed, approach)
+        if len(self.moves) == 3:          # probe X, probe Y, first correction
+            self.focus_z = 5.2
+
+    def nozzle_px(self):
+        return super().nozzle_px() + self.tilt * (self.z - 5.0)
+
+
+def test_refocus_mid_loop_is_not_mistaken_for_xy_motion():
+    rig = DriftingFocus()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, tolerance=0.005))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    msgs = [s["message"] for s in st["steps"]]
+    assert any(m.startswith("Sharpest at Z") for m in msgs)
+    assert any(m.startswith("Refocused during this correction") for m in msgs)
+    assert abs(rig.z - 5.2) <= 0.03
+
+
+class FlickerRig(SimRig):
+    """Every third frame misses the nozzle, like a ring half outside the
+    zoomed-in area: the scan's last sample finds nothing."""
+
+    def frame(self):
+        img = super().frame()
+        return np.full_like(img, 90) if self.frame_no % 3 == 0 else img
+
+
+def test_scan_survives_a_last_frame_without_the_nozzle():
+    rig = FlickerRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST))
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+
+
+class DropoutRig(SimRig):
+    """The camera loses the nozzle for `drop` frames when told to."""
+    drop = 0
+
+    def frame(self):
+        img = super().frame()
+        if self.drop > 0:
+            self.drop -= 1
+            return np.full_like(img, 90)
+        return img
+
+
+def test_lost_after_a_correction_searches_the_whole_frame():
+    rig = DropoutRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, stable_timeout=0))
+    step = a._step
+
+    def drop_on_first_correction(phase, msg, **kw):
+        if phase == "correct" and not any(s["phase"] == "correct" for s in a.snapshot()["steps"]):
+            rig.drop = 3          # the whole tracked measurement sees nothing
+        step(phase, msg, **kw)
+
+    a._step = drop_on_first_correction
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert any("searching a wider area" in s["message"] for s in st["steps"])
+
+
+def test_lost_for_good_still_fails_cleanly():
+    rig = DropoutRig()
+    a = AutoAligner(rig, rig, PARAMS, dict(FAST, stable_timeout=0))
+    step = a._step
+
+    def drop_on_first_correction(phase, msg, **kw):
+        if phase == "correct":
+            rig.drop = 10_000     # gone for good
+        step(phase, msg, **kw)
+
+    a._step = drop_on_first_correction
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "failed" and "Lost the nozzle after correction 1" in st["message"]
+
+
+TWIN = (300.0, 560.0)
+
+
+class TwinRig(SimRig):
+    """A static, crisp circle with the same rings as the nozzle (like an
+    out-of-focus highlight of the same size) elsewhere in view."""
+
+    def frame(self):
+        img = super().frame()
+        twin = render_nozzle(TWIN[0], TWIN[1], self.w, self.h, noise=0.0, seed=0)
+        x0, y0 = int(TWIN[0] - 120), int(TWIN[1] - 120)
+        img[y0:y0 + 240, x0:x0 + 240] = twin[y0:y0 + 240, x0:x0 + 240]
+        return img
+
+
+def test_check_move_does_not_jump_to_a_same_size_circle():
+    store = MappingStore()
+    rig = SimRig()
+    AutoAligner(rig, rig, PARAMS, FAST, camera_key="cam", store=store).run()
+    rig2 = TwinRig(start=(150.35, 149.8))
+    lock = dict(zip(("x", "y"), rig2.nozzle_px()), radius=60)
+    a = AutoAligner(rig2, rig2, PARAMS, dict(FAST, tolerance=0.005), camera_key="cam",
+                    store=store, lock=lock)
+    a.run()
+    st = a.snapshot()
+    assert st["state"] == "converged", st["message"]
+    assert not any("no longer matches" in s["message"] for s in st["steps"])
+    assert np.hypot(*(rig2.nozzle_px() - [rig2.w / 2, rig2.h / 2])) < 3

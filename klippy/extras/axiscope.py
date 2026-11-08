@@ -3,6 +3,7 @@ import os
 import ast
 from . import tools_calibrate
 from . import toolchanger
+from . import output_pin
 
 class Axiscope:
     def __init__(self, config):
@@ -17,9 +18,33 @@ class Axiscope:
         self.move_speed    = config.getint('move_speed'  , 60)
         self.z_move_speed  = config.getint('z_move_speed', 10)
         self.samples       = config.getint('samples'     , 10)
+        # How MOVE_TO_ZSWITCH travels to the switch: one diagonal move, or one
+        # axis first so long tools don't sweep across nearby hardware.
+        self.approach      = config.getchoice('zswitch_approach',
+                                              {'direct': 'direct', 'x_then_y': 'x_then_y', 'y_then_x': 'y_then_x'},
+                                              'direct')
 
         self.pin              = config.get('pin'             , None)
         self.config_file_path = config.get('config_file_path', None)
+
+        # Optional LED PWM pin (e.g. Ember Prototype V2 camera LED)
+        self.led_pwm_pin = config.get('led_pwm_pin', None)
+        if self.led_pwm_pin is not None:
+            ppins = self.printer.lookup_object('pins')
+            self.led_mcu_pin = ppins.setup_pin('pwm', self.led_pwm_pin)
+            max_duration = self.led_mcu_pin.get_mcu().max_nominal_duration()
+            led_pwm_cycle_time = config.getfloat('led_pwm_cycle_time', 0.010,
+                                                  above=0., maxval=max_duration)
+            self.led_mcu_pin.setup_cycle_time(led_pwm_cycle_time)
+            self.led_mcu_pin.setup_max_duration(0.)
+            self.led_value = config.getfloat('led_pwm_initial_value', 0.,
+                                              minval=0., maxval=1.)
+            self.led_mcu_pin.setup_start_value(self.led_value, 0.)
+            self.led_gcrq = output_pin.GCodeRequestQueue(
+                config, self.led_mcu_pin.get_mcu(), self._set_led_pin)
+        else:
+            self.led_mcu_pin = None
+            self.led_value = 0.
         
         # Load gcode_macro module for template support
         self.gcode_macro = self.printer.load_object(config, 'gcode_macro')
@@ -70,6 +95,7 @@ class Axiscope:
         self.gcode.register_command('AXISCOPE_SAVE_TOOL_OFFSET',          self.cmd_AXISCOPE_SAVE_TOOL_OFFSET,          desc=self.cmd_AXISCOPE_SAVE_TOOL_OFFSET_help)
         self.gcode.register_command('AXISCOPE_SAVE_MULTIPLE_TOOL_OFFSETS', self.cmd_AXISCOPE_SAVE_MULTIPLE_TOOL_OFFSETS, desc=self.cmd_AXISCOPE_SAVE_MULTIPLE_TOOL_OFFSETS_help)
         self.gcode.register_command('AXISCOPE_SET_ENDSTOP_POSITION', self.cmd_AXISCOPE_SET_ENDSTOP_POSITION, desc=self.cmd_AXISCOPE_SET_ENDSTOP_POSITION_help)
+        self.gcode.register_command('AXISCOPE_SET_LED', self.cmd_AXISCOPE_SET_LED, desc=self.cmd_AXISCOPE_SET_LED_help)
 
     def handle_connect(self):
         if self.config_file_path is not None:
@@ -96,7 +122,15 @@ class Axiscope:
             'endstop_x':       self.x_pos,
             'endstop_y':       self.y_pos,
             'endstop_z':       self.z_pos,
+            'has_led':         self.led_mcu_pin is not None,
+            'led_value':       self.led_value,
         }
+
+    def _set_led_pin(self, print_time, value):
+        if value == self.led_value:
+            return "discard", 0.
+        self.led_value = value
+        self.led_mcu_pin.set_pwm(print_time, value)
         
     def run_gcode(self, name, template, extra_context):
         """Run gcode with template expansion and context"""
@@ -201,9 +235,18 @@ class Axiscope:
         # Get current position
         current_pos = toolhead.get_position()
 
-        # First move horizontally to the target X,Y at current Z height
-        #toolhead.manual_move([self.x_pos, self.y_pos, current_pos[2]], self.move_speed)
-        self.gcode_move.cmd_G1(self.gcode.create_gcode_command("G0", "G0", { 'X': self.x_pos, 'Y': self.y_pos, 'Z': current_pos[2], 'F': self.move_speed*60 }))
+        # First move horizontally to the target X,Y at current Z height.
+        # With zswitch_approach x_then_y / y_then_x, one axis lines up with the
+        # switch first and the other then moves straight in.
+        if self.approach == 'x_then_y':
+            legs = [{'X': self.x_pos}, {'X': self.x_pos, 'Y': self.y_pos}]
+        elif self.approach == 'y_then_x':
+            legs = [{'Y': self.y_pos}, {'X': self.x_pos, 'Y': self.y_pos}]
+        else:
+            legs = [{'X': self.x_pos, 'Y': self.y_pos}]
+        for leg in legs:
+            params = dict(leg, Z=current_pos[2], F=self.move_speed*60)
+            self.gcode_move.cmd_G1(self.gcode.create_gcode_command("G0", "G0", params))
 
         # Then move vertically to the target Z height
         toolhead.manual_move([None, None, self.z_pos+self.lift_z], self.z_move_speed)
@@ -212,6 +255,14 @@ class Axiscope:
     cmd_PROBE_ZSWITCH_help = "Probe the Z switch to determine offset."
 
     def cmd_PROBE_ZSWITCH(self, gcmd):
+        # Refuse with a G-code error instead of crashing: an unexpected Python
+        # exception here makes Klipper shut the whole printer down.
+        if self.probe_multi_axis is None:
+            raise gcmd.error("PROBE_ZSWITCH: no Z switch pin configured in [axiscope].")
+        if self.toolchanger.active_tool is None:
+            raise gcmd.error("PROBE_ZSWITCH: the toolchanger has no active tool (status: %s). "
+                             "Run INITIALIZE_TOOLCHANGER, then try again."
+                             % self.toolchanger.get_status(self.printer.get_reactor().monotonic()).get('status', 'unknown'))
         toolhead  = self.printer.lookup_object('toolhead')
         tool_no   = str(self.toolchanger.active_tool.tool_number)
         start_pos = toolhead.get_position()
@@ -441,6 +492,23 @@ class Axiscope:
                 gcmd.respond_info(f"Set axiscope endstop positions: {' '.join(set_axes)}")
         else:
             gcmd.respond_info("No axes specified. Use X=, Y=, Z=, and/or CURRENT=1 parameters.")
+
+    cmd_AXISCOPE_SET_LED_help = "Set the Ember camera LED PWM brightness (0.0-1.0)"
+
+    def cmd_AXISCOPE_SET_LED(self, gcmd):
+        """
+        Set the brightness of the optional Ember Prototype V2 camera LED.
+
+        Usage
+        -----
+        AXISCOPE_SET_LED VALUE=<0.0-1.0>
+        """
+        if self.led_mcu_pin is None:
+            gcmd.respond_error("Axiscope has no led_pwm_pin configured.")
+            return
+
+        value = gcmd.get_float('VALUE', minval=0., maxval=1.)
+        self.led_gcrq.queue_gcode_request(value)
 
 def load_config(config):
     return Axiscope(config)
