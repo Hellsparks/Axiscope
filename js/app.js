@@ -609,6 +609,30 @@ function renderWorkflow() {
   setText('session-tag', Vision.settings.enabled ? 'AUTO XY · OPENCV' : 'MANUAL XY');
 }
 
+// Workflow steps are shortcuts: 01 changes to T0, 02 to the next tool
+// still to align (or the next one round once all are done).
+function nextToolToAlign() {
+  const tools = S.status ? S.status.tools.filter(n => n !== 0) : [];
+  if (!tools.length) return null;
+  const todo = tools.find(n => !newOffset(n));
+  if (todo !== undefined) return todo;
+  const after = tools.find(n => n > activeTool());
+  return after !== undefined ? after : tools[0];
+}
+
+function workflowTool(n) {
+  if (!S.online || !S.status) { notice('Connect to the printer first.', 'error'); return; }
+  if (S.busy || CameraPosition.moving) { notice('Wait for the current move to finish.', 'error'); return; }
+  if (n === null) { notice('No other tools found on this printer.', 'error'); return; }
+  if (n !== 0 && !S.ref) { notice('Capture the T0 reference first.', 'error'); return; }
+  if (n === activeTool()) {
+    notice(n === 0 ? 'T0 is active: centre it on the crosshair and capture the reference.'
+                   : 'T' + n + ' is active: align it, then capture its position.');
+    return;
+  }
+  toolChange(n);
+}
+
 let renderedTools = '';
 function renderTools() {
   const st = S.status;
@@ -971,6 +995,9 @@ function initEvents() {
     const b = e.target.closest('[data-tool]');
     if (b) toolChange(Number(b.dataset.tool));
   });
+  $('wf-ref').addEventListener('click', () => workflowTool(0));
+  $('wf-align').addEventListener('click', () => workflowTool(nextToolToAlign()));
+  $('wf-review').addEventListener('click', () => navigate('offsets'));
   $('tool-select').addEventListener('change', e => toolChange(Number(e.target.value)));
   document.querySelectorAll('.jog[data-jog]').forEach(b => b.addEventListener('click', () => jog(b.dataset.jog, Number(b.dataset.dir))));
   $('capture').addEventListener('click', capture);

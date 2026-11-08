@@ -43,11 +43,11 @@
     <!-- ============================ CALIBRATION ============================ -->
     <section class="view" id="view-calibration" data-oc-screen="calibration">
       <section class="workflow" aria-label="Calibration progress">
-        <div class="workflow-step" id="wf-ref"><span class="step-num">01</span><div>Set reference<small id="wf-ref-sub">Capture the T0 position</small></div></div>
+        <button type="button" class="workflow-step" id="wf-ref" title="Change to T0 and bring it to the camera"><span class="step-num">01</span><div>Set reference<small id="wf-ref-sub">Capture the T0 position</small></div></button>
         <span class="workflow-line"></span>
-        <div class="workflow-step" id="wf-align"><span class="step-num">02</span><div>Align tools<small id="wf-align-sub">0 of 0 tools calibrated</small></div></div>
+        <button type="button" class="workflow-step" id="wf-align" title="Change to the next tool that still needs aligning"><span class="step-num">02</span><div>Align tools<small id="wf-align-sub">0 of 0 tools calibrated</small></div></button>
         <span class="workflow-line"></span>
-        <div class="workflow-step" id="wf-review"><span class="step-num">03</span><div>Review offsets<small>Verify &amp; save</small></div></div>
+        <button type="button" class="workflow-step" id="wf-review" title="Open the offsets review"><span class="step-num">03</span><div>Review offsets<small>Verify &amp; save</small></div></button>
         <span class="session-tag" id="session-tag">MANUAL XY</span>
       </section>
 

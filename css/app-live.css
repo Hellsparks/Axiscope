@@ -320,3 +320,8 @@ main { max-width: 2200px; }
 .campos-value span { height: 10px; width: 1px; background: #444c3a; }
 .campos-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .campos-actions .secondary { justify-content: center; }
+
+/* Workflow steps are buttons (shortcuts to T0 / next tool / review) */
+button.workflow-step { background: none; border: 0; padding: 0; font: inherit; text-align: left; cursor: pointer; }
+button.workflow-step:hover { color: #e7ede2; filter: none; }
+button.workflow-step:hover .step-num { border-color: var(--accent); }
